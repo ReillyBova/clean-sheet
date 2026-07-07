@@ -235,6 +235,130 @@ def largest_component(binary: np.ndarray, min_area_frac: float = 0.05) -> np.nda
     return out
 
 
+def repair_boundary_defects(mask: np.ndarray, min_dev_frac: float = 0.006,
+                         max_width_frac: float = 0.15) -> np.ndarray:
+    """Repair narrow, localized segmentation defects on the page boundary.
+
+    A photographed page is essentially a convex quad whose edges are straight or
+    bow gently (perspective/barrel). Segmentation defects are *sharp, localized*
+    departures from that smooth edge, and they come in both directions:
+      * inward notches — a finger, cast shadow, or torn corner makes the mask
+        cave in toward the page centre;
+      * outward bulges — glare, an adjacent sheet, or a bright table edge gets
+        absorbed into the mask so the boundary balloons out past the paper.
+    Either way the Coons patch then propagates the defect into the page interior
+    (as waviness/pinch) or samples background into the result.
+
+    We compare the boundary to a heavily-smoothed copy of itself. Smoothing is a
+    low-pass filter: it keeps the gentle, low-frequency bow of a real edge but
+    erases sharp, high-frequency defects. Wherever the actual boundary departs
+    from that smooth reference by more than a small fraction of the page — in
+    either direction — over a short, localized run, we snap it back to the
+    reference. The reference follows the real edge on both shoulders of the
+    defect, so the repaired boundary stays on paper: inward notches are filled
+    out to the true edge and outward bulges are trimmed back to it. Broad edge
+    bow is left untouched (the smooth copy matches it, so nothing is flagged).
+    No absolute page dimensions are assumed — thresholds scale with the contour.
+    """
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return mask
+    c = max(contours, key=cv2.contourArea)[:, 0, :].astype(np.float32)
+    if len(c) < 16:
+        return mask
+
+    m = 1500
+    poly = resample_polyline_by_arclength(np.vstack([c, c[:1]]), m + 1)[:m]
+
+    # Roll so the seam (index 0) sits at a real corner. Corners are protected
+    # from repair, so no defect run can ever straddle the seam — which keeps the
+    # circular run-growing logic below simple and correct.
+    corners = find_corners_from_contour(poly)
+    tl_i = int(np.argmin(np.sum((poly - corners['tl']) ** 2, axis=1)))
+    poly = np.roll(poly, -tl_i, axis=0)
+
+    win = max(9, int(m * 0.05) | 1)
+    pad = win // 2
+    kernel = np.ones(win, np.float32) / win
+
+    diag = float(np.hypot(*mask.shape[:2]))
+    min_dev = min_dev_frac * diag
+    max_run = int(max_width_frac * m)
+
+    # The page's four real corners are high-frequency features that the
+    # smoothing rounds off, so they read as large deviations. Exclude a
+    # neighbourhood around each corner: genuine notches/bulges live along the
+    # edges, and snapping a true corner would blunt it. Corners don't move under
+    # our edge-only repairs, so this is computed once.
+    guard = pad + max(9, m // 40)
+    protected = np.zeros(m, bool)
+    for cp in corners.values():
+        ci = int(np.argmin(np.sum((poly - cp) ** 2, axis=1)))
+        protected[[(ci + off) % m for off in range(-guard, guard + 1)]] = True
+
+    def smoothed(p: np.ndarray) -> np.ndarray:
+        padded = np.vstack([p[-pad:], p, p[:pad]])
+        return np.column_stack([np.convolve(padded[:, 0], kernel, mode='valid'),
+                                np.convolve(padded[:, 1], kernel, mode='valid')])
+
+    # Iterate: a low-pass of the boundary partially *follows* a defect, so one
+    # pass only shaves its tip. Bridging that tip and recomputing the reference
+    # exposes more of the defect; a few passes converge to full removal. Each
+    # accepted run is bridged by a straight segment between its two clean
+    # shoulders (points just outside the run); those shoulders lie on the real
+    # edge, so the bridge stays on paper — inward notches are filled out and
+    # outward bulges trimmed in, both without ever sampling background.
+    changed = False
+    for _ in range(8):
+        dev = np.linalg.norm(poly - smoothed(poly), axis=1)
+        defect = (dev > min_dev) & ~protected
+        if not defect.any() or defect.all():
+            break
+        idx = np.where(defect)[0]
+        starts = idx[np.where(np.diff(np.r_[idx[-1] - m, idx]) != 1)[0]]
+        pass_changed = False
+        new_poly = poly.copy()
+        for s0 in starts:
+            run = []
+            i = s0
+            while defect[i % m]:
+                run.append(i % m)
+                i += 1
+                if len(run) > m:
+                    break
+            if len(run) > max_run:
+                continue
+            # Grow the run outward past the defect's shallow flanks (where the
+            # deviation dips below threshold but the boundary is still displaced)
+            # so the bridge anchors on stable edge. Never cross into a corner.
+            grow = max(win, len(run))
+            lo, hi = run[0], run[-1]
+            for _g in range(grow):
+                if not protected[(lo - 1) % m]:
+                    lo -= 1
+                if not protected[(hi + 1) % m]:
+                    hi += 1
+            span = [(k) % m for k in range(lo, hi + 1)]
+            if len(span) > max_run + 2 * grow:
+                continue
+            a = poly[(lo - 1) % m]
+            b = poly[(hi + 1) % m]
+            for step, j in enumerate(span, start=1):
+                t = step / (len(span) + 1)
+                new_poly[j] = (1.0 - t) * a + t * b
+            pass_changed = True
+        if not pass_changed:
+            break
+        poly = new_poly
+        changed = True
+    if not changed:
+        return mask
+
+    out = np.zeros_like(mask)
+    cv2.fillPoly(out, [np.round(poly).astype(np.int32).reshape(-1, 1, 2)], 255)
+    return fill_holes(out)
+
+
 def segment_page(img_bgr: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """Segment the paper as the dominant bright connected component."""
     h, w = img_bgr.shape[:2]
@@ -273,6 +397,9 @@ def segment_page(img_bgr: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]
     # Safety net: smoothing can occasionally reconnect a stray region; keep only
     # the dominant page component for a clean single-contour boundary.
     mask = largest_component(mask)
+    # Repair localized concave defects (finger/shadow notches) so they are not
+    # propagated into the page interior by the Coons patch.
+    mask = repair_boundary_defects(mask)
 
     debug = {
         "01_lightness_raw.png": L,
@@ -363,36 +490,7 @@ def smooth_curve(points: np.ndarray, n: int, window_frac: float) -> np.ndarray:
     return np.column_stack([xs, ys]).astype(np.float32)
 
 
-def _robust_poly_curve(curve: np.ndarray, deg: int = 4) -> np.ndarray:
-    """Fit a low-order polynomial to a boundary curve, rejecting outliers.
 
-    Real page edges are smooth and gently curved (well within a degree-4 fit).
-    Segmentation defects — e.g. a finger/shadow notch or a stray spike in the
-    detected boundary — are sharp local deviations. A plain moving average does
-    not remove a large notch, and the Coons patch then propagates that boundary
-    defect into the page interior as waviness. Fitting a low-order polynomial
-    with one outlier-rejection pass keeps the true gentle curvature but discards
-    such spikes. Endpoints (the shared page corners) are preserved exactly.
-    """
-    n = len(curve)
-    if n <= deg + 2:
-        return curve
-    t = np.linspace(0.0, 1.0, n)
-
-    def fit(vals: np.ndarray) -> np.ndarray:
-        c = np.polyfit(t, vals, deg)
-        resid = vals - np.polyval(c, t)
-        s = float(np.std(resid)) + 1e-6
-        keep = np.abs(resid) < 2.0 * s
-        if keep.sum() > deg + 2:
-            c = np.polyfit(t[keep], vals[keep], deg)
-        return np.polyval(c, t)
-
-    xs = fit(curve[:, 0])
-    ys = fit(curve[:, 1])
-    xs[0], ys[0] = curve[0]
-    xs[-1], ys[-1] = curve[-1]
-    return np.column_stack([xs, ys]).astype(np.float32)
 
 
 def orient_edges(raw_edges: dict[str, np.ndarray], corners: dict[str, np.ndarray], n: int = 1200, smooth: float = 0.045) -> dict[str, np.ndarray]:
@@ -407,8 +505,6 @@ def orient_edges(raw_edges: dict[str, np.ndarray], corners: dict[str, np.ndarray
         curve = smooth_curve(raw_edges[name], n, smooth)
         if np.linalg.norm(curve[0] - corners[start]) > np.linalg.norm(curve[-1] - corners[start]):
             curve = curve[::-1].copy()
-        # Reject segmentation spikes/notches so they don't warp the interior.
-        curve = _robust_poly_curve(curve)
         out[name] = curve
     return out
 
