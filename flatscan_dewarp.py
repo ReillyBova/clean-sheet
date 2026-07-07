@@ -283,3 +283,125 @@ def straighten_staves(gray: np.ndarray, max_disp_factor: float = 6.0,
         prev_refine = md
 
     return out, info
+
+
+def _staff_left_margins(gray: np.ndarray, min_lines: int = 3):
+    """Robust per-system staff left-edge x, and (ytop, ybot) bands.
+
+    The reference is the leftmost column that contains at least ``min_lines`` of
+    the system's staff lines. This deliberately ignores rehearsal-mark boxes
+    (only 2 horizontal edges), measure numbers and other marginalia sitting left
+    of / above the staff, which otherwise corrupt a naive "leftmost ink" margin
+    and trigger spurious corrections on already-aligned pages.
+    """
+    bw = (gray < 150).astype(np.uint8) * 255
+    thickness, space = _staff_metrics(bw)
+    horiz = _emphasize(bw, thickness)
+    systems = _find_systems(horiz, space)
+    cys: list[float] = []
+    lefts: list[float] = []
+    bands: list[tuple[int, int]] = []
+    for (ytop, ybot) in systems:
+        band = horiz[ytop:ybot, :]
+        rowproj = (band > 0).sum(1).astype(np.float32)
+        if rowproj.max() <= 0:
+            continue
+        line_rows = np.where(rowproj > rowproj.max() * 0.4)[0]
+        if len(line_rows) < min_lines:
+            continue
+        col_line_count = (band[line_rows, :] > 0).sum(0)
+        xs = np.where(col_line_count >= min_lines)[0]
+        if len(xs) == 0:
+            continue
+        cys.append((ytop + ybot) / 2.0)
+        lefts.append(float(xs.min()))
+        bands.append((ytop, ybot))
+    return np.array(cys, np.float32), np.array(lefts, np.float32), bands, space
+
+
+def _theil_sen(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    slopes = []
+    n = len(x)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if x[j] != x[i]:
+                slopes.append((y[j] - y[i]) / (x[j] - x[i]))
+    if not slopes:
+        return 0.0, float(np.median(y))
+    m = float(np.median(slopes))
+    b = float(np.median(y - m * x))
+    return m, b
+
+
+def _robust_drift_slope(cys: np.ndarray, lefts: np.ndarray) -> float:
+    """Slope of the smooth left-margin drift (distortion), robust to indent and
+    top-of-page outliers. Theil-Sen for a robust first estimate, then a
+    least-squares refit on inliers (|resid| <= 3*MAD) to sharpen it."""
+    m, b = _theil_sen(cys, lefts)
+    resid = lefts - (m * cys + b)
+    mad = np.median(np.abs(resid - np.median(resid))) + 1e-6
+    keep = np.abs(resid - np.median(resid)) < 3.0 * mad
+    if keep.sum() >= 3:
+        A = np.vstack([cys[keep], np.ones(keep.sum())]).T
+        m = float(np.linalg.lstsq(A, lefts[keep], rcond=None)[0][0])
+    return m
+
+
+def align_system_margins(gray: np.ndarray, max_shift_factor: float = 10.0,
+                         min_shift_px: float = 10.0):
+    """De-drift staff-system left margins so the page reads as a clean vertical
+    column, without leaning bar lines. Returns (output_gray, info).
+
+    Only the *smooth linear drift* of the per-system margin (capture distortion)
+    is removed; each system is then translated horizontally as a rigid block,
+    held constant across its own staff band and blended linearly through the
+    gaps -- the horizontal mirror of ``straighten_staves``. Because the shift is
+    constant within a band, bar lines and stems inside a system are never
+    sheared; the gentle transition lives only in the (near-empty) gaps between
+    systems. Intentional indents live in the *residual* about the drift line, so
+    they are not part of the removed slope and are preserved. Robust fitting
+    ignores top-of-page and indent outliers, so already-aligned pages get a
+    slope near zero and this is a no-op.
+    """
+    h, w = gray.shape
+    cys, lefts, bands, space = _staff_left_margins(gray)
+    info: dict = dict(reason="ok", nsys=int(len(cys)), space=int(space))
+    if len(cys) < 4:
+        info.update(applied=False, reason="too few systems")
+        return gray, info
+
+    slope = _robust_drift_slope(cys, lefts)
+    y_ref = float(cys.mean())
+    shifts = slope * (y_ref - cys)  # per-system rigid horizontal shift (de-drift)
+    max_shift = float(np.abs(shifts).max())
+    info["drift_px_over_page"] = float(slope * h)
+    info["max_shift"] = max_shift
+    if max_shift < min_shift_px:
+        info.update(applied=False, reason="drift below threshold")
+        return gray, info
+    if max_shift > max_shift_factor * space or max_shift > 0.10 * w:
+        info.update(applied=False, reason=f"shift {max_shift:.0f}px exceeds safety limit")
+        return gray, info
+
+    # Build a per-row horizontal shift: constant across each system band, linear
+    # in the gaps. Control points at band edges (strictly increasing y) mirror
+    # the vertical dewarp so a system translates rigidly (no internal shear).
+    order = np.argsort([b[0] for b in bands])
+    tops = np.array([bands[i][0] for i in order], np.float32)
+    bots = np.array([bands[i][1] for i in order], np.float32)
+    sh = shifts[order]
+    yk = np.empty(2 * len(tops), np.float32)
+    yk[0::2] = tops
+    yk[1::2] = bots
+    yk = np.maximum.accumulate(yk) + np.arange(len(yk)) * 1e-3
+    dk = np.empty(2 * len(tops), np.float32)
+    dk[0::2] = sh
+    dk[1::2] = sh
+    ys = np.arange(h, dtype=np.float32)
+    row_shift = np.interp(ys, yk, dk, left=dk[0], right=dk[-1]).astype(np.float32)
+    map_x = (np.arange(w, dtype=np.float32)[None, :] - row_shift[:, None]).astype(np.float32)
+    map_y = np.repeat(ys[:, None], w, axis=1).astype(np.float32)
+    out = cv2.remap(gray, map_x, map_y, cv2.INTER_CUBIC,
+                    borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+    info.update(applied=True)
+    return out, info

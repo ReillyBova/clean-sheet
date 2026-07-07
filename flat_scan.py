@@ -770,9 +770,13 @@ def process_page(
 
     straighten_info = None
     cleaned_pre_straighten = cleaned
+    align_info = None
+    cleaned_pre_align = cleaned
     if straighten:
         cleaned_pre_straighten = cleaned.copy()
         cleaned, straighten_info = flatscan_dewarp.straighten_staves(cleaned)
+        cleaned_pre_align = cleaned.copy()
+        cleaned, align_info = flatscan_dewarp.align_system_margins(cleaned)
 
     if debug_dir is not None:
         d = debug_dir / f"page_{page_num_1based:04d}"
@@ -795,7 +799,9 @@ def process_page(
         imwrite(d / "16_ink_mask_overlay.png", ink_debug["ink-overlay"])
         if straighten_info is not None:
             imwrite(d / "17_pre_straighten.png", cleaned_pre_straighten)
-            imwrite(d / "18_straightened.png", cleaned)
+            imwrite(d / "18_straightened.png", cleaned_pre_align)
+        if align_info is not None:
+            imwrite(d / "19_aligned.png", cleaned)
         for png in d.glob("*.png"):
             if png.name in {"07_page_mask_overlay.png", "08_source_boundary_uv_grid.png", "09_rectified_color.png", "10_clean_output.png", "11_alt_soft_gray.png", "12_alt_soft_black.png", "13_alt_binary.png"}:
                 save_preview(png, d / (png.stem + "_preview.jpg"))
@@ -806,6 +812,7 @@ def process_page(
             f.write(f"ink_threshold={thr}\n")
             f.write(f"output_pixels={out_w}x{out_h}\n")
             f.write(f"straighten={straighten_info}\n")
+            f.write(f"align={align_info}\n")
     return cleaned
 
 
