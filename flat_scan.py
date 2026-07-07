@@ -213,12 +213,27 @@ class InputPages:
 # ----------------------------- segmentation -----------------------------
 
 def fill_holes(binary: np.ndarray) -> np.ndarray:
-    h, w = binary.shape
-    ff = binary.copy()
-    flood = np.zeros((h + 2, w + 2), np.uint8)
-    cv2.floodFill(ff, flood, (0, 0), 255)
-    inv = cv2.bitwise_not(ff)
-    return cv2.bitwise_or(binary, inv)
+    """Fill background pockets fully enclosed by foreground.
+
+    Background components that reach the image border are "outside" the page;
+    any background component that does *not* touch the border is an enclosed
+    hole and gets filled. This is deliberately border-agnostic rather than a
+    single flood from a fixed corner: if the foreground happens to touch that
+    corner (e.g. a bright table bridge reaching the frame edge), a corner flood
+    would fail and fill the *entire* frame. Labelling the background and keeping
+    only border-connected components as "outside" can never balloon the mask to
+    the whole image.
+    """
+    bg = cv2.bitwise_not(binary)
+    num, labels = cv2.connectedComponents(bg, connectivity=4)
+    if num <= 1:
+        return binary
+    border = np.concatenate([labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]])
+    outside = np.unique(border)
+    outside_mask = np.isin(labels, outside)
+    out = binary.copy()
+    out[(bg > 0) & ~outside_mask] = 255
+    return out
 
 
 def largest_component(binary: np.ndarray, min_area_frac: float = 0.05) -> np.ndarray:
@@ -390,7 +405,17 @@ def segment_page(img_bgr: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]
     # strong close can bridge the page across small gaps into unrelated bright
     # regions that touch the image border (photo/lens edges, an adjacent sheet),
     # fusing them into one blob and destroying the page's corner geometry.
-    seed = cv2.morphologyEx(seed, cv2.MORPH_OPEN, kernel, iterations=1)
+    #
+    # The opening kernel is deliberately larger than the closing kernel. The
+    # illumination-normalized image inflates the local contrast of dark surfaces
+    # (wood grain, mat texture) into thin bright filaments; a filament that
+    # bridges the page to a border speck fuses them into one component that
+    # wraps around the background, and the mask then balloons to the whole frame.
+    # A wider opening severs these thin bridges while leaving the solid page body
+    # (and its corners) intact — the page is far thicker than any grain filament.
+    open_k = max(31, (min(h, w) // 80) | 1)
+    open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_k, open_k))
+    seed = cv2.morphologyEx(seed, cv2.MORPH_OPEN, open_kernel, iterations=1)
     mask = largest_component(seed)
 
     # Now that the page is isolated, consolidate its interior safely.
