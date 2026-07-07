@@ -366,14 +366,22 @@ def segment_page(img_bgr: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]
     lab = cv2.cvtColor(blur_bgr, cv2.COLOR_BGR2LAB)
     L = lab[:, :, 0]
 
-    k = max(101, (min(h, w) // 12) | 1)
+    # Illumination estimate: use a large kernel (~1/6 of the short side, similar
+    # to clean_ink's) so this captures the *lighting* field — including soft
+    # edge/curl shadows — while preserving the paper-vs-background reflectance
+    # step. A smaller kernel tracks that reflectance step itself, which is why an
+    # earlier min/12 estimate forced a brittle absolute-brightness fallback that
+    # dropped shadowed paper and carved notches into the mask.
+    k = max(101, (min(h, w) // 6) | 1)
     bg = cv2.GaussianBlur(L, (k, k), 0)
     norm = cv2.divide(L, bg, scale=180)
     norm = cv2.normalize(norm, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-    _, raw = cv2.threshold(L, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    _, rel = cv2.threshold(norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    seed = cv2.bitwise_and(raw, rel)
+    # Segment on the illumination-normalized image. Paper (high reflectance)
+    # separates cleanly from the darker surface regardless of its colour (wood,
+    # mat, etc.) and shadowed paper stays on the paper side of the threshold, so
+    # curl/edge shadows no longer read as background.
+    _, seed = cv2.threshold(norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     close_k = max(17, (min(h, w) // 160) | 1)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k, close_k))
@@ -404,9 +412,7 @@ def segment_page(img_bgr: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]
     debug = {
         "01_lightness_raw.png": L,
         "02_lightness_normalized.png": norm,
-        "03_threshold_raw.png": raw,
-        "04_threshold_normalized.png": rel,
-        "05_segmentation_seed.png": seed,
+        "03_segmentation_seed.png": seed,
     }
     return mask, debug
 
