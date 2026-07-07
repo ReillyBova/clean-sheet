@@ -154,12 +154,25 @@ def compute_displacement(gray: np.ndarray):
     xcs = list(range(xL + block // 2, xR - block // 2, step))
     if len(xcs) < 4:
         return None, dict(reason="content too narrow", nsys=len(systems))
+    # Also sample the true content ends. The interior scan insets by half a
+    # block so its correlation window stays fully on content, which leaves the
+    # outermost ~half-block of every staff unmeasured -- and that is exactly
+    # where staves visibly bend up/down (bottom-right corners especially),
+    # because the resample below freezes those columns flat via constant
+    # extrapolation. Adding explicit end samples (with clamped half-windows in
+    # _profile) measures the end bend so it gets corrected; if an end has too
+    # little ink to correlate reliably, the val<=0.5 gate simply drops it and we
+    # degrade to the previous constant-hold behaviour -- never worse.
+    if xcs[0] - xL > step // 2:
+        xcs = [xL] + xcs
+    if xR - xcs[-1] > step // 2:
+        xcs = xcs + [xR]
 
     step_shift = max(3, int(space * 0.6))
     cmid = len(xcs) // 2
     sys_curves: list[tuple[int, int, np.ndarray, np.ndarray]] = []
     for (ytop, ybot) in systems:
-        profs = [_profile(horiz[:, xc - block // 2: xc + block // 2], ytop, ybot) for xc in xcs]
+        profs = [_profile(horiz[:, max(0, xc - block // 2): xc + block // 2], ytop, ybot) for xc in xcs]
         offs = np.zeros(len(xcs), np.float32)
         acc = 0.0
         for i in range(cmid + 1, len(xcs)):
@@ -218,11 +231,22 @@ def compute_displacement(gray: np.ndarray):
     return (map_x, map_y), info
 
 
-def straighten_staves(gray: np.ndarray, max_disp_factor: float = 6.0):
+def straighten_staves(gray: np.ndarray, max_disp_factor: float = 6.0,
+                      passes: int = 5, refine_min_px: float = 1.5):
     """Flatten wavy/skewed staff lines. Returns (output_gray, info).
 
     Falls back to returning ``gray`` unchanged when no reliable staff structure
     is found or the required warp is implausibly large.
+
+    The first pass removes the bulk of the waviness. Because the correction is a
+    per-system rigid translation blended across gaps, a little residual bow can
+    survive the first pass (the measured shift lags a sharp local wave). Running
+    the *same* estimator again on the once-straightened page measures only that
+    small residual and squeezes it out -- e.g. peak-to-peak staff deviation
+    ~5.5px -> ~3px on a typical part page -- for the price of a tiny (~2px)
+    extra warp. We iterate until the refinement becomes negligible
+    (``refine_min_px``) or ``passes`` is reached, so the cost is bounded and a
+    page that is already flat stops after one measuring pass.
     """
     res, info = compute_displacement(gray)
     if res is None:
@@ -232,7 +256,30 @@ def straighten_staves(gray: np.ndarray, max_disp_factor: float = 6.0):
         info["applied"] = False
         info["reason"] = f"maxdisp {info['maxdisp']:.0f} exceeds safety limit"
         return gray, info
+
     map_x, map_y = res
     out = cv2.remap(gray, map_x, map_y, cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
     info["applied"] = True
+    info["passes"] = 1
+
+    prev_refine = float("inf")
+    for _ in range(passes - 1):
+        res_r, info_r = compute_displacement(out)
+        if res_r is None:
+            break
+        md = float(info_r["maxdisp"])
+        # A refinement pass must be small: large -> the estimator locked onto a
+        # different line (unreliable), so keep the previous, safe result.
+        if md > info["space"] * max_disp_factor:
+            break
+        if md < refine_min_px:
+            break  # converged; nothing meaningful left to correct
+        if md >= prev_refine:
+            break  # not shrinking -> at the measurement noise floor; stop
+        out = cv2.remap(out, res_r[0], res_r[1], cv2.INTER_CUBIC,
+                        borderMode=cv2.BORDER_REPLICATE)
+        info["passes"] += 1
+        info["maxdisp_refine"] = md
+        prev_refine = md
+
     return out, info
