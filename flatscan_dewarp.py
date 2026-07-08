@@ -358,7 +358,17 @@ def _staff_guided_displacement(gray: np.ndarray, max_disp_factor: float = 8.0):
     if below.any():
         map_y[below] = yout[below, None] + (Yfull[-1] - T[-1])[None, :]
     map_y = map_y.astype(np.float32)
-    np.maximum.accumulate(map_y, axis=0, out=map_y)
+    # Enforce a minimum downward slope instead of blunt fold-prevention. At the
+    # extreme crease the staff comb compresses until lines merge in the source;
+    # forcing merged lines apart to their targets would stretch a near-zero
+    # source span over many output rows, which a plain monotonic clamp turns into
+    # a flat plateau -- one source row smeared into a solid black bar. Capping the
+    # stretch (map_y must advance >= min_slope per output row) keeps such regions
+    # merely compressed rather than smeared, while leaving well-resolved regions
+    # (slope ~1) untouched.
+    min_slope = 0.30
+    yidx = np.arange(h, dtype=np.float32)[:, None]
+    map_y = np.maximum.accumulate(map_y - min_slope * yidx, axis=0) + min_slope * yidx
 
     maxdisp = float(np.abs(map_y - yout[:, None]).max())
     info["maxdisp"] = maxdisp
@@ -859,11 +869,18 @@ def align_right_margin(gray: np.ndarray, min_dev_px: float = 10.0,
         info.update(applied=False, reason="too few systems")
         return gray, info
 
-    target_r = float(np.median(rights))
+    # Target a low percentile of the staff-right extents and only ever pull wide
+    # systems *inward*. Stretching a system outward pushes any content beyond its
+    # staff line (end ties, the final slur) toward -- and past -- the page margin,
+    # which reads as the top systems overflowing the page; and a "short" staff
+    # extent is often just the crease fade fooling the detector, so stretching to
+    # match it is doubly wrong. Compression-only alignment squares the margin
+    # without ever driving content off the page.
+    target_r = float(np.percentile(rights, 30))
     dev = float(np.std(rights))
     info["right_std_before"] = dev
     info["target_r"] = target_r
-    if float(np.max(np.abs(rights - target_r))) < min_dev_px:
+    if float(np.max(rights) - target_r) < min_dev_px:
         info.update(applied=False, reason="right margin already square")
         return gray, info
 
@@ -878,9 +895,11 @@ def align_right_margin(gray: np.ndarray, min_dev_px: float = 10.0,
     ri = rights[order]
     denom = np.maximum(target_r - li, 1.0)
     beta = (ri - li) / denom
-    lo, hi = 1.0 / (1.0 + max_stretch), 1.0 + max_stretch
-    beta = np.clip(beta, lo, hi)
+    # Only compress (beta >= 1): a system wider than target is pulled in; a
+    # narrower one is left exactly as-is rather than stretched outward.
+    beta = np.clip(beta, 1.0, 1.0 + max_stretch)
     alpha = li * (1.0 - beta)
+
 
     # Constant within each band, linearly blended across gaps (mirror of the
     # vertical straightener / left de-drift control-point scheme).
