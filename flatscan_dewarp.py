@@ -35,6 +35,10 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+# A guided warp whose residual staff waviness is at or below this (px) is
+# accepted outright, skipping the slower rigid comparison pass.
+_GUIDED_ACCEPT_PX = 3.0
+
 
 def _staff_metrics(bw: np.ndarray) -> tuple[int, int]:
     """Estimate (staff_line_thickness, staff_space) via vertical run-lengths."""
@@ -408,27 +412,36 @@ def straighten_staves(gray: np.ndarray, max_disp_factor: float = 6.0,
     rigid result: if the guided trace misbehaves (unusual editions, dense pages)
     its output measures wavier and is discarded.
     """
+    # Try the (fast, vectorized) guided warp first. If it lands the staff lines
+    # convincingly flat, accept it without paying for the slower rigid pass; only
+    # when it is marginal or unavailable do we compute rigid and keep the flatter.
+    guided, ginfo = _staff_guided_displacement(gray)
+    guided_out = None
+    if guided is not None:
+        guided_out = cv2.remap(gray, guided[0], guided[1], cv2.INTER_CUBIC,
+                               borderMode=cv2.BORDER_REPLICATE)
+        gflat = _staff_flatness(guided_out)
+        ginfo["flatness"] = gflat
+        ginfo["method"] = "guided"
+        if gflat <= _GUIDED_ACCEPT_PX:
+            ginfo["applied"] = True
+            return guided_out, ginfo
+
     rigid_out, rinfo = _straighten_staves_rigid(gray, max_disp_factor, passes, refine_min_px)
     rigid_flat = _staff_flatness(rigid_out)
-    best_out, best_info, best_flat = rigid_out, rinfo, rigid_flat
-    best_info["method"] = "rigid"
+    rinfo["method"] = "rigid"
 
-    guided, ginfo = _staff_guided_displacement(gray)
-    if guided is not None:
-        gout = cv2.remap(gray, guided[0], guided[1], cv2.INTER_CUBIC,
-                         borderMode=cv2.BORDER_REPLICATE)
-        gflat = _staff_flatness(gout)
-        ginfo["flatness"] = gflat
-        # Require a real improvement to switch, so we don't trade the robust
-        # rigid result for a noisy tie.
-        if gflat + 0.5 < best_flat:
-            best_out, best_info, best_flat = gout, ginfo, gflat
-            best_info["method"] = "guided"
-
-    best_info["applied"] = True
-    best_info["flatness"] = best_flat
-    best_info["rigid_flatness"] = rigid_flat
-    return best_out, best_info
+    # Keep whichever leaves the staff lines flatter; the guided warp must clear
+    # the rigid result by a margin so we never trade robustness for a noisy tie.
+    if guided_out is not None and ginfo["flatness"] + 0.5 < rigid_flat:
+        ginfo["applied"] = True
+        ginfo["rigid_flatness"] = rigid_flat
+        return guided_out, ginfo
+    rinfo["applied"] = True
+    rinfo["flatness"] = rigid_flat
+    if guided_out is not None:
+        rinfo["guided_flatness"] = ginfo["flatness"]
+    return rigid_out, rinfo
 
 
 def _straighten_staves_rigid(gray: np.ndarray, max_disp_factor: float = 6.0,
