@@ -307,16 +307,21 @@ def _trace_staff_lines(gray: np.ndarray):
 
 
 def _staff_guided_displacement(gray: np.ndarray, max_disp_factor: float = 8.0):
-    """Vertical dewarp that irons every staff line flat to its own mean height.
+    """Vertical dewarp that irons each staff *comb* flat, per column.
 
-    Returns ``((map_x, map_y), info)`` or ``(None, info)``. Unlike the rigid
-    per-system translation, this moves each of the (up to five) staff lines of a
-    system independently to a horizontal target, so a line that bends only at the
-    binding-side end gets flattened there too. Targets are each line's own mean y
-    (curl/tilt removed, real staff spacing preserved -- no forced stretch). The
-    map is a per-column vertical interpolation through the traced-line control
-    points, which blends smoothly through the inter-system gaps; monotonicity is
-    enforced so it can never fold.
+    Returns ``((map_x, map_y), info)`` or ``(None, info)``. For every system we
+    trace its staff lines and take their per-column median as the comb centre,
+    then flatten that centre curve to its mean height. The correction is applied
+    as a per-column RIGID vertical shift of the whole comb -- every row in a
+    system's band at a given column moves by the same offset -- held constant
+    across the band and blended linearly through the inter-system gaps.
+
+    Because the shift never varies *within* a band, staff-line spacing is exactly
+    preserved: the comb can bend or curl (crease ends), and we straighten that
+    bend, but lines can never be squeezed together or stretched apart. That is
+    what a per-line re-spacing warp got wrong -- where lines merged in the source
+    near the binding it smeared them into a solid black bar; a rigid comb shift
+    cannot. The offset is bounded and smooth, so map_y stays monotonic.
     """
     h, w = gray.shape
     xcs, sys_lines, space = _trace_staff_lines(gray)
@@ -324,51 +329,56 @@ def _staff_guided_displacement(gray: np.ndarray, max_disp_factor: float = 8.0):
     if len(sys_lines) < 2:
         return None, dict(info, reason="too few traced systems")
 
-    T: list[float] = []
-    Yfull: list[np.ndarray] = []
     xs_all = np.arange(w)
+    tops: list[float] = []
+    bots: list[float] = []
+    offsets: list[np.ndarray] = []  # per-system per-column comb-centre offset
     for (ytop, ybot, L) in sys_lines:
-        for k in range(L.shape[0]):
-            ys = L[k]; good = ~np.isnan(ys)
-            if good.sum() < 4:
-                continue
-            yf = np.interp(xs_all, xcs[good], ys[good], left=ys[good][0], right=ys[good][-1])
-            T.append(float(np.mean(yf)))
-            Yfull.append(yf.astype(np.float32))
-    if len(T) < 6:
-        return None, dict(info, reason="too few traced lines")
+        # Comb centre per column = median across the traced lines (robust to a
+        # single mistraced line); interpolate over columns that were traced.
+        center = np.nanmedian(L, axis=0)
+        good = ~np.isnan(center)
+        if good.sum() < 4:
+            continue
+        cf = np.interp(xs_all, xcs[good], center[good],
+                       left=center[good][0], right=center[good][-1]).astype(np.float32)
+        # light smoothing to avoid injecting per-column jitter
+        k = 31
+        cf = np.convolve(np.pad(cf, k // 2, mode="edge"), np.ones(k) / k, mode="valid").astype(np.float32)
+        tops.append(float(ytop)); bots.append(float(ybot))
+        offsets.append(cf - float(np.mean(cf)))  # flatten centre to its mean
+    if len(offsets) < 2:
+        return None, dict(info, reason="too few traced combs")
 
-    T = np.array(T, np.float64)
-    Yfull = np.array(Yfull, np.float32)
-    order = np.argsort(T)
-    T = T[order]; Yfull = Yfull[order]
-    N = len(T)
+    tops = np.array(tops); bots = np.array(bots)
+    order = np.argsort(tops)
+    tops = tops[order]; bots = bots[order]
+    offsets = [offsets[i] for i in order]
+    S = len(tops)
+
+    # Control points at each band's edges (strictly increasing y); the per-column
+    # offset is constant across a band and blends linearly through the gaps.
+    yk = np.empty(2 * S, np.float64)
+    yk[0::2] = tops; yk[1::2] = bots
+    yk = np.maximum.accumulate(yk) + np.arange(2 * S) * 1e-3
+    dk = np.empty((2 * S, w), np.float32)
+    dk[0::2] = offsets
+    dk[1::2] = offsets
 
     yout = np.arange(h, dtype=np.float64)
-    ki = np.clip(np.searchsorted(T, yout) - 1, 0, N - 2)
-    Tk = T[ki]; Tk1 = T[ki + 1]
-    frac = ((yout - Tk) / np.maximum(Tk1 - Tk, 1e-6))[:, None]
-    map_y = Yfull[ki] * (1 - frac) + Yfull[ki + 1] * frac
-    above = yout < T[0]; below = yout > T[-1]
+    ki = np.clip(np.searchsorted(yk, yout) - 1, 0, 2 * S - 2)
+    yk0 = yk[ki]; yk1 = yk[ki + 1]
+    frac = ((yout - yk0) / np.maximum(yk1 - yk0, 1e-6))[:, None]
+    off = dk[ki] * (1 - frac) + dk[ki + 1] * frac        # (h, w) offset field
+    above = yout < yk[0]; below = yout > yk[-1]
     if above.any():
-        # Hold the top line's displacement constant above it -- translate the
-        # header/above-staff region rigidly rather than extrapolating a slope,
-        # which would shear content (page numbers, tempo marks, footers).
-        map_y[above] = yout[above, None] + (Yfull[0] - T[0])[None, :]
+        off[above] = dk[0][None, :]                      # rigid hold above first band
     if below.any():
-        map_y[below] = yout[below, None] + (Yfull[-1] - T[-1])[None, :]
-    map_y = map_y.astype(np.float32)
-    # Enforce a minimum downward slope instead of blunt fold-prevention. At the
-    # extreme crease the staff comb compresses until lines merge in the source;
-    # forcing merged lines apart to their targets would stretch a near-zero
-    # source span over many output rows, which a plain monotonic clamp turns into
-    # a flat plateau -- one source row smeared into a solid black bar. Capping the
-    # stretch (map_y must advance >= min_slope per output row) keeps such regions
-    # merely compressed rather than smeared, while leaving well-resolved regions
-    # (slope ~1) untouched.
-    min_slope = 0.30
-    yidx = np.arange(h, dtype=np.float32)[:, None]
-    map_y = np.maximum.accumulate(map_y - min_slope * yidx, axis=0) + min_slope * yidx
+        off[below] = dk[-1][None, :]                     # rigid hold below last band
+    map_y = (yout[:, None] + off).astype(np.float32)
+    # Offsets are bounded and smooth, but guard monotonicity defensively so a
+    # steep gap transition can never fold.
+    np.maximum.accumulate(map_y, axis=0, out=map_y)
 
     maxdisp = float(np.abs(map_y - yout[:, None]).max())
     info["maxdisp"] = maxdisp
