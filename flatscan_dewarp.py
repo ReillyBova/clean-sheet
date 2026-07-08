@@ -801,6 +801,40 @@ def _staff_hextents(gray: np.ndarray, min_lines: int = 3):
     return np.array(lefts, np.float32), np.array(rights, np.float32), bands, space
 
 
+def _system_edges(gray: np.ndarray, bands, space: int):
+    """Robust per-system (left, right) content edges, immune to binding seams.
+
+    A half-spread scan often leaves a faint vertical seam (the neighbour page /
+    fold shadow) near the outer edge, separated from the real music by a wide
+    band of whitespace. Taken as the rightmost inked column it masquerades as the
+    system's right edge, corrupting margin alignment and centring. We instead
+    split each system's inked columns into segments at large horizontal gaps and
+    peel off any *thin* trailing/leading segment that sits beyond such a gap --
+    that is the seam. A real final barline hugs its content (small gap) and is
+    kept; a resumed passage after a multi-measure rest is wide and is kept.
+    """
+    ink = (gray < 100)
+    gap_thr = int(3 * space)
+    thin = int(1.5 * space)
+    lefts = []
+    rights = []
+    for (ytop, ybot) in bands:
+        cols = np.where(ink[int(ytop):int(ybot)].sum(0) > 1)[0]
+        if len(cols) == 0:
+            lefts.append(np.nan); rights.append(np.nan); continue
+        brk = np.where(np.diff(cols) > gap_thr)[0]
+        starts = [cols[0]] + [cols[b + 1] for b in brk]
+        ends = [cols[b] for b in brk] + [cols[-1]]
+        # peel thin isolated seam segments off the right, then the left
+        while len(ends) > 1 and (ends[-1] - starts[-1]) < thin:
+            ends.pop(); starts.pop()
+        while len(ends) > 1 and (ends[0] - starts[0]) < thin:
+            ends.pop(0); starts.pop(0)
+        lefts.append(float(starts[0]))
+        rights.append(float(ends[-1]))
+    return np.array(lefts, np.float64), np.array(rights, np.float64)
+
+
 def center_content(gray: np.ndarray, min_imbalance_px: float = 24.0,
                    max_shift_frac: float = 0.06):
     """Balance the music block's left/right margins on the page. Returns
@@ -821,8 +855,12 @@ def center_content(gray: np.ndarray, min_imbalance_px: float = 24.0,
         info.update(applied=False, reason="too few systems")
         return gray, info
 
-    block_left = float(np.median(lefts))
-    block_right = float(np.median(rights))
+    # Use seam-immune content edges: the staff-line block right is under-read
+    # where the line fades at the binding, and the raw ink extent is inflated by
+    # the neighbour-page seam near the outer edge -- either skews the centring.
+    c_lefts, c_rights = _system_edges(gray, bands, int(space))
+    block_left = float(np.nanmedian(c_lefts))
+    block_right = float(np.nanmedian(c_rights))
     left_margin = block_left
     right_margin = (w - 1) - block_right
     info["left_margin"] = left_margin
@@ -879,20 +917,19 @@ def align_right_margin(gray: np.ndarray, min_dev_px: float = 10.0,
         info.update(applied=False, reason="too few systems")
         return gray, info
 
-    # Re-measure each system's right edge from *content*, not the staff line.
-    # The staff line fades where it curves into the binding, so the staff-line
-    # detector under-reads the right extent of the crease-most systems -- and
-    # then compression-only alignment (below) pulls every *other* system in while
-    # leaving those under-read ones out, so they visibly protrude. The rightmost
-    # inked column in the staff band is fade-immune and marks the true right edge
-    # (final barline / note), giving a consistent measure across all systems.
-    ink = (gray < 100)
-    rights = rights.astype(np.float64).copy()
-    for i, (ytop, ybot) in enumerate(bands):
-        band = ink[int(ytop):int(ybot)]
-        cols = np.where(band.sum(0) > 1)[0]
-        if len(cols):
-            rights[i] = float(cols.max())
+    # Re-measure each system's right edge from *content*, seam-immune. The staff
+    # line fades where it curves into the binding (under-reads the crease-most
+    # systems), while the raw ink extent is inflated by the neighbour-page seam
+    # near the outer edge -- both corrupt the alignment. `_system_edges` trims the
+    # thin seam beyond a wide whitespace gap and returns the true content edge.
+    c_lefts, c_rights = _system_edges(gray, bands, int(space))
+    keep = ~np.isnan(c_rights)
+    if keep.sum() < 4:
+        info.update(applied=False, reason="too few measurable systems")
+        return gray, info
+    lefts = lefts.astype(np.float64)
+    lefts[keep] = c_lefts[keep]
+    rights = np.where(keep, c_rights, rights.astype(np.float64))
 
     # Target a low percentile of the right edges and only ever pull wide systems
     # *inward*. Stretching a system outward would push content past the page
