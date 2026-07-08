@@ -828,14 +828,27 @@ def clean_ink(rect_bgr: np.ndarray, mode: str = "soft-gray", threshold_bias: int
     # solid instead of only their darkest cores (improves ink retention). The
     # support mask still confines ink to detected strokes, keeping paper clean.
     darkness = 1.0 - smoothstep(thr - 22, thr + 10, norm.astype(np.float32))
+    # Force stroke *interiors* fully opaque. `darkness` is derived from the
+    # normalized brightness, which specular flash glare lightens in the page
+    # centre; eroding the (glare-robust) ink mask marks the solid body of every
+    # stroke, so we can pin those pixels to full coverage. This keeps notehead
+    # and blob interiors uniformly dark instead of washing out under glare, while
+    # the sub-threshold stroke *boundary* still ramps for soft anti-aliasing.
+    core = cv2.erode(mask, np.ones((3, 3), np.uint8), iterations=1).astype(bool)
+    darkness = np.where(core, 1.0, darkness)
     alpha = np.where(support, np.clip(darkness, 0, 1), 0)
     alpha = cv2.GaussianBlur(alpha.astype(np.float32), (0, 0), sigmaX=0.45)
     alpha = np.clip(alpha ** 0.8, 0, 1)
 
     paper = np.full_like(gray, 255.0)
     soft_black = np.clip(paper * (1 - alpha) + 8.0 * alpha, 0, 255).astype(np.uint8)
-    ink_source = np.clip(norm.astype(np.float32) * 0.5, 0, 160)
-    soft_gray = np.clip(paper * (1 - alpha) + ink_source * alpha, 0, 255).astype(np.uint8)
+    # Ink tone is driven by *coverage* (the glare-robust `darkness`), not by the
+    # raw normalized brightness. Solid stroke bodies (darkness -> 1) render near
+    # black and uniform across the page; only genuinely faint/partial ink lifts
+    # toward gray. This preserves soft-gray's fine-edge character while removing
+    # the centre-page flash wash that a `norm * 0.5` fill produced.
+    ink_tone = np.clip((1.0 - np.clip(darkness, 0, 1)) * 90.0, 0, 160)
+    soft_gray = np.clip(paper * (1 - alpha) + ink_tone * alpha, 0, 255).astype(np.uint8)
     binary = np.full_like(norm, 255)
     binary[mask > 0] = 0
 
