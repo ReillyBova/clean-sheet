@@ -405,3 +405,130 @@ def align_system_margins(gray: np.ndarray, max_shift_factor: float = 10.0,
                     borderMode=cv2.BORDER_CONSTANT, borderValue=255)
     info.update(applied=True)
     return out, info
+
+
+def _vertical_strokes(gray: np.ndarray, space: int, thickness: int):
+    """Return (y_centers, leans, heights) for tall, thin vertical strokes.
+
+    Bar lines and note stems are drawn perpendicular to the staff, so in a truly
+    rectified page they are vertical. Their measured lean (dx/dy) is therefore a
+    direct read-out of any residual horizontal shear -- a signal far more robust
+    than the page margin (which rehearsal marks and indents corrupt).
+
+    A tall 1-D opening *locates* vertical ink, but its slope must not be measured
+    on the opened result: a vertical structuring element clips the leaning stroke
+    back toward vertical and roughly halves the apparent lean. So we use the
+    opening only to find each stroke's bounding box, then fit its slope on the
+    *raw* ink via per-row centroids (skipping rows where a neighbouring blob
+    bleeds into the window), which recovers the true lean.
+    """
+    ink = (gray < 100).astype(np.uint8)
+    vlen = max(21, int(round(space * 2.5)))
+    vk = cv2.getStructuringElement(cv2.MORPH_RECT, (1, vlen))
+    vert = cv2.morphologyEx(ink, cv2.MORPH_OPEN, vk)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(vert, 8)
+    min_h = max(vlen, int(round(space * 3)))
+    max_w = max(6, thickness * 3)
+    pad = 3
+    ys_c: list[float] = []
+    leans: list[float] = []
+    heights: list[float] = []
+    for i in range(1, n):
+        x, y, ww, hh, area = st[i]
+        if hh < min_h or ww > max_w or hh < ww * 3:
+            continue
+        x0 = max(0, x - pad)
+        sub = ink[y:y + hh, x0:x + ww + pad]
+        rys: list[float] = []
+        rxs: list[float] = []
+        wlim = ww + 2 * pad
+        for r in range(hh):
+            cx = np.where(sub[r] > 0)[0]
+            if len(cx) == 0 or len(cx) > wlim:
+                continue  # empty row, or a neighbouring blob bled into the window
+            rys.append(float(r))
+            rxs.append(float(cx.mean()) + x0)
+        if len(rys) < min_h * 0.7:
+            continue
+        m = np.polyfit(np.asarray(rys), np.asarray(rxs), 1)[0]
+        ys_c.append(float(y + hh / 2.0))
+        leans.append(float(m))
+        heights.append(float(hh))
+    return np.array(ys_c), np.array(leans), np.array(heights)
+
+
+def deskew_barlines(gray: np.ndarray, max_shift_factor: float = 8.0,
+                    min_lean_deg: float = 0.12):
+    """Remove a residual horizontal shear so bar lines/stems read as vertical.
+
+    Returns ``(output_gray, info)``. The straightener flattens staff lines
+    (horizontals) but a page can still carry a horizontal shear -- vertical
+    strokes leaning, and that lean drifting down the page -- which the eye reads
+    as a skew even when the staves are level. We model it as a shift field
+    ``g(y)`` that is the same at every x (so horizontal staff lines only slide,
+    staying horizontal) and whose derivative is the local vertical-stroke lean.
+
+    We measure the lean of many bar lines and stems, robustly fit ``lean(y)`` as
+    a line in y (constant + gradient, covering both a uniform shear and one that
+    rotates through the page), integrate to ``g(y)``, and remap. Bounded and
+    guarded: needs enough well-spread strokes, ignores a negligible lean, and
+    caps the applied shift so a mis-measurement cannot warp the page.
+    """
+    h, w = gray.shape
+    bw = (gray < 150).astype(np.uint8) * 255
+    thickness, space = _staff_metrics(bw)
+    ys, leans, heights = _vertical_strokes(gray, space, thickness)
+    info: dict = dict(reason="ok", nstrokes=int(len(ys)), space=int(space))
+    if len(ys) < 20:
+        info.update(applied=False, reason="too few vertical strokes")
+        return gray, info
+
+    # Robust inlier set: drop italic/outlier strokes far from the median lean.
+    med = float(np.median(leans))
+    mad = float(np.median(np.abs(leans - med))) + 1e-6
+    keep = np.abs(leans - med) < 4.0 * mad
+    if keep.sum() < 15 or (ys[keep].max() - ys[keep].min()) < 0.3 * h:
+        info.update(applied=False, reason="strokes not well spread")
+        return gray, info
+
+    yk = ys[keep]
+    lk = leans[keep]
+    wk = heights[keep]
+    yc = float(np.average(yk, weights=wk))
+    # Weighted least-squares fit lean(y) = a + b*(y - yc).
+    dy = yk - yc
+    W = wk
+    S0 = W.sum(); S1 = (W * dy).sum(); S2 = (W * dy * dy).sum()
+    T0 = (W * lk).sum(); T1 = (W * dy * lk).sum()
+    det = S0 * S2 - S1 * S1
+    if abs(det) < 1e-9:
+        a = T0 / S0; b = 0.0
+    else:
+        a = (T0 * S2 - T1 * S1) / det
+        b = (S0 * T1 - S1 * T0) / det
+
+    info["lean_center_deg"] = float(np.degrees(np.arctan(a)))
+    info["lean_gradient_deg_per_page"] = float(np.degrees(np.arctan(b * h)))
+
+    ys_all = np.arange(h, dtype=np.float64)
+    d = ys_all - yc
+    # g(y) = integral of lean(y) dy = a*(y-yc) + b*(y-yc)^2/2, centered at yc.
+    g = a * d + 0.5 * b * d * d
+    max_shift = float(np.abs(g).max())
+    info["max_shift"] = max_shift
+
+    # A lean this small is within engraving/measurement noise -> leave it.
+    corner_lean_deg = abs(np.degrees(np.arctan(a))) + abs(np.degrees(np.arctan(b * h / 2.0)))
+    if corner_lean_deg < min_lean_deg:
+        info.update(applied=False, reason="lean below threshold")
+        return gray, info
+    if max_shift > max_shift_factor * space or max_shift > 0.05 * w:
+        info.update(applied=False, reason=f"shift {max_shift:.0f}px exceeds safety limit")
+        return gray, info
+
+    map_x = (np.arange(w, dtype=np.float32)[None, :] + g[:, None].astype(np.float32))
+    map_y = np.repeat(ys_all.astype(np.float32)[:, None], w, axis=1)
+    out = cv2.remap(gray, map_x, map_y, cv2.INTER_CUBIC,
+                    borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+    info.update(applied=True)
+    return out, info

@@ -980,10 +980,12 @@ def process_page(
     straighten_info = None
     cleaned_pre_straighten = cleaned
     align_info = None
+    shear_info = None
     cleaned_pre_align = cleaned
     if straighten:
         cleaned_pre_straighten = cleaned.copy()
         cleaned, straighten_info = flatscan_dewarp.straighten_staves(cleaned)
+        cleaned, shear_info = flatscan_dewarp.deskew_barlines(cleaned)
         cleaned_pre_align = cleaned.copy()
         cleaned, align_info = flatscan_dewarp.align_system_margins(cleaned)
 
@@ -1023,6 +1025,7 @@ def process_page(
             f.write(f"ink_threshold={thr}\n")
             f.write(f"output_pixels={out_w}x{out_h}\n")
             f.write(f"straighten={straighten_info}\n")
+            f.write(f"shear={shear_info}\n")
             f.write(f"align={align_info}\n")
             if crease is not None:
                 f.write(f"crease=side:{crease['side']},score:{crease['score']:.1f}\n")
