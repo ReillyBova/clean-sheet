@@ -231,9 +231,208 @@ def compute_displacement(gray: np.ndarray):
     return (map_x, map_y), info
 
 
+def _seed_line_rows(prof: np.ndarray, space: int) -> list[int]:
+    """Row indices of the staff-line peaks in a vertical ink profile."""
+    peaks: list[int] = []
+    thr = prof.max() * 0.30
+    for i in range(1, len(prof) - 1):
+        if prof[i] > thr and prof[i] >= prof[i - 1] and prof[i] >= prof[i + 1]:
+            if peaks and (i - peaks[-1]) < space * 0.6:
+                if prof[i] > prof[peaks[-1]]:
+                    peaks[-1] = i
+                continue
+            peaks.append(i)
+    return peaks
+
+
+def _trace_staff_lines(gray: np.ndarray):
+    """Trace every staff line of every system across the full page width.
+
+    Returns ``(xcs, systems_lines, space)`` where ``systems_lines`` is a list of
+    ``(ytop, ybot, L)`` and ``L`` is an ``(nlines, len(xcs))`` array of the y
+    position of each staff line at each sampled column.
+
+    Each line is followed as a ridge: seeded from the staff-line peaks at the
+    (reliable) page centre, then tracked column by column within a half-space
+    window. Ridge-following stays locked on the real line through notes and the
+    crease fade far more robustly than global comb correlation, which is what
+    lets us iron the binding-side line *ends* flat rather than just translating a
+    rigid comb. Per-column sort forbids traced lines from crossing.
+    """
+    h, w = gray.shape
+    bw = (gray < 150).astype(np.uint8) * 255
+    thickness, space = _staff_metrics(bw)
+    emph = _emphasize(bw, thickness)
+    horiz = (emph > 0).astype(np.uint8)
+    systems = _find_systems(emph, space)
+    xcs = np.arange(0, w, 6)
+    win = max(3, int(round(space * 0.45)))
+    out = []
+    for (ytop, ybot) in systems:
+        cx0, cx1 = int(w * 0.40), int(w * 0.60)
+        prof = horiz[ytop:ybot, cx0:cx1].sum(1).astype(np.float32)
+        if prof.max() <= 0:
+            continue
+        seeds = [ytop + p for p in _seed_line_rows(prof, space)]
+        if len(seeds) < 3:
+            continue
+        seedx = (cx0 + cx1) // 2
+        ci = int(np.argmin(np.abs(xcs - seedx)))
+        L = np.full((len(seeds), len(xcs)), np.nan, np.float32)
+        for ki, p in enumerate(seeds):
+            prev = float(p); L[ki, ci] = p
+            for j in range(ci + 1, len(xcs)):
+                lo = max(0, int(prev - win)); hi = int(prev + win)
+                seg = np.where(horiz[lo:hi, xcs[j]] > 0)[0]
+                if len(seg):
+                    prev = lo + float(np.median(seg))
+                L[ki, j] = prev
+            prev = float(p)
+            for j in range(ci - 1, -1, -1):
+                lo = max(0, int(prev - win)); hi = int(prev + win)
+                seg = np.where(horiz[lo:hi, xcs[j]] > 0)[0]
+                if len(seg):
+                    prev = lo + float(np.median(seg))
+                L[ki, j] = prev
+        L = np.sort(L, axis=0)  # forbid crossings
+        k = 7  # light along-x smoothing kills jitter, keeps the real bend
+        for ki in range(L.shape[0]):
+            L[ki] = np.convolve(np.pad(L[ki], k // 2, mode="edge"), np.ones(k) / k, mode="valid")
+        out.append((ytop, ybot, L))
+    return xcs, out, space
+
+
+def _staff_guided_displacement(gray: np.ndarray, max_disp_factor: float = 8.0):
+    """Vertical dewarp that irons every staff line flat to its own mean height.
+
+    Returns ``((map_x, map_y), info)`` or ``(None, info)``. Unlike the rigid
+    per-system translation, this moves each of the (up to five) staff lines of a
+    system independently to a horizontal target, so a line that bends only at the
+    binding-side end gets flattened there too. Targets are each line's own mean y
+    (curl/tilt removed, real staff spacing preserved -- no forced stretch). The
+    map is a per-column vertical interpolation through the traced-line control
+    points, which blends smoothly through the inter-system gaps; monotonicity is
+    enforced so it can never fold.
+    """
+    h, w = gray.shape
+    xcs, sys_lines, space = _trace_staff_lines(gray)
+    info = dict(reason="ok", nsys=len(sys_lines), space=int(space), method="guided")
+    if len(sys_lines) < 2:
+        return None, dict(info, reason="too few traced systems")
+
+    T: list[float] = []
+    Yfull: list[np.ndarray] = []
+    xs_all = np.arange(w)
+    for (ytop, ybot, L) in sys_lines:
+        for k in range(L.shape[0]):
+            ys = L[k]; good = ~np.isnan(ys)
+            if good.sum() < 4:
+                continue
+            yf = np.interp(xs_all, xcs[good], ys[good], left=ys[good][0], right=ys[good][-1])
+            T.append(float(np.mean(yf)))
+            Yfull.append(yf.astype(np.float32))
+    if len(T) < 6:
+        return None, dict(info, reason="too few traced lines")
+
+    T = np.array(T, np.float64)
+    Yfull = np.array(Yfull, np.float32)
+    order = np.argsort(T)
+    T = T[order]; Yfull = Yfull[order]
+    N = len(T)
+
+    yout = np.arange(h, dtype=np.float64)
+    ki = np.clip(np.searchsorted(T, yout) - 1, 0, N - 2)
+    Tk = T[ki]; Tk1 = T[ki + 1]
+    frac = ((yout - Tk) / np.maximum(Tk1 - Tk, 1e-6))[:, None]
+    map_y = Yfull[ki] * (1 - frac) + Yfull[ki + 1] * frac
+    above = yout < T[0]; below = yout > T[-1]
+    if above.any():
+        slope = (Yfull[1] - Yfull[0]) / (T[1] - T[0] + 1e-6)
+        map_y[above] = Yfull[0][None, :] + (yout[above, None] - T[0]) * slope[None, :]
+    if below.any():
+        slope = (Yfull[-1] - Yfull[-2]) / (T[-1] - T[-2] + 1e-6)
+        map_y[below] = Yfull[-1][None, :] + (yout[below, None] - T[-1]) * slope[None, :]
+    map_y = map_y.astype(np.float32)
+    np.maximum.accumulate(map_y, axis=0, out=map_y)
+
+    maxdisp = float(np.abs(map_y - yout[:, None]).max())
+    info["maxdisp"] = maxdisp
+    if maxdisp > space * max_disp_factor:
+        return None, dict(info, reason=f"maxdisp {maxdisp:.0f} exceeds safety limit")
+    map_x = np.tile(np.arange(w, dtype=np.float32)[None, :], (h, 1))
+    return (map_x, map_y), info
+
+
+def _staff_flatness(gray: np.ndarray) -> float:
+    """Median per-system staff-line waviness (peak-to-peak px) across the width.
+
+    Lower is flatter. Used to pick the better of the guided and rigid warps so a
+    page can never be made worse: whichever remaps to flatter staff lines wins.
+    """
+    h, w = gray.shape
+    bw = (gray < 150).astype(np.uint8) * 255
+    thickness, space = _staff_metrics(bw)
+    emph = _emphasize(bw, thickness)
+    systems = _find_systems(emph, space)
+    horiz = (emph > 0).astype(np.uint8)
+    devs = []
+    for (ytop, ybot) in systems:
+        band = horiz[ytop:ybot]
+        rp = band.sum(1).astype(np.float32)
+        if rp.max() <= 0:
+            continue
+        lr = np.where(rp > rp.max() * 0.4)[0]
+        if len(lr) < 3:
+            continue
+        yl = ytop + int(lr[0])
+        ys = []
+        for xc in range(int(w * 0.06), int(w * 0.985), 8):
+            seg = horiz[max(0, yl - space):yl + space, xc]
+            r = np.where(seg > 0)[0]
+            if len(r):
+                ys.append(max(0, yl - space) + int(np.median(r)))
+        if len(ys) >= 8:
+            devs.append(max(ys) - min(ys))
+    return float(np.median(devs)) if devs else float("inf")
+
+
 def straighten_staves(gray: np.ndarray, max_disp_factor: float = 6.0,
                       passes: int = 5, refine_min_px: float = 1.5):
     """Flatten wavy/skewed staff lines. Returns (output_gray, info).
+
+    Builds two candidates -- a staff-line-guided warp that irons each comb flat
+    per column (excellent on curled binding-side ends) and the rigid per-system
+    correlation warp (robust on clean flat scans) -- and keeps whichever leaves
+    the staff lines flatter. Guaranteed never to make a page worse than the
+    rigid result: if the guided trace misbehaves (unusual editions, dense pages)
+    its output measures wavier and is discarded.
+    """
+    rigid_out, rinfo = _straighten_staves_rigid(gray, max_disp_factor, passes, refine_min_px)
+    rigid_flat = _staff_flatness(rigid_out)
+    best_out, best_info, best_flat = rigid_out, rinfo, rigid_flat
+    best_info["method"] = "rigid"
+
+    guided, ginfo = _staff_guided_displacement(gray)
+    if guided is not None:
+        gout = cv2.remap(gray, guided[0], guided[1], cv2.INTER_CUBIC,
+                         borderMode=cv2.BORDER_REPLICATE)
+        gflat = _staff_flatness(gout)
+        ginfo["flatness"] = gflat
+        # Require a real improvement to switch, so we don't trade the robust
+        # rigid result for a noisy tie.
+        if gflat + 0.5 < best_flat:
+            best_out, best_info, best_flat = gout, ginfo, gflat
+            best_info["method"] = "guided"
+
+    best_info["applied"] = True
+    best_info["flatness"] = best_flat
+    best_info["rigid_flatness"] = rigid_flat
+    return best_out, best_info
+
+
+def _straighten_staves_rigid(gray: np.ndarray, max_disp_factor: float = 6.0,
+                             passes: int = 5, refine_min_px: float = 1.5):
+    """Rigid per-system straightener (legacy fallback). Returns (output, info).
 
     Falls back to returning ``gray`` unchanged when no reliable staff structure
     is found or the required warp is implausibly large.
