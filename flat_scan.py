@@ -818,6 +818,40 @@ def remove_small_components(mask: np.ndarray, min_area: int = 10) -> np.ndarray:
     return out
 
 
+def despeckle_isolated(mask: np.ndarray, big_area: int = 150, protect_radius: int = 15) -> np.ndarray:
+    """Drop small ink blobs that sit alone in the paper, away from real content.
+
+    Illumination normalization is unreliable in the perimeter band of the page
+    (edge shadow / vignetting), so the ink threshold sprinkles small isolated
+    specks there. They used to render as faint gray and went unnoticed; with the
+    glare-robust solid-black ink tone they read as visible grain. Real small
+    marks (staccato dots, the dot of a dotted note, accents) always sit next to
+    substantial ink — a notehead, stem, or staff line — whereas the perimeter
+    noise is isolated. So we keep every large component (real notes/text/lines)
+    plus any small component within `protect_radius` of one, and discard the rest.
+    """
+    m = (mask > 0).astype(np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(m, 8)
+    if n <= 1:
+        return mask
+    areas = stats[:, cv2.CC_STAT_AREA]
+    ws = stats[:, cv2.CC_STAT_WIDTH]
+    hs = stats[:, cv2.CC_STAT_HEIGHT]
+    is_large = (areas >= big_area) | (ws >= 25) | (hs >= 25)
+    is_large[0] = False  # background
+
+    large = is_large[labels]
+    k = 2 * protect_radius + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    prot = cv2.dilate(large.astype(np.uint8), kernel)
+    touch = np.zeros(n, dtype=bool)
+    touch[np.unique(labels[prot > 0])] = True
+
+    keep = is_large | touch
+    keep[0] = False
+    return np.where(keep[labels], np.uint8(255), np.uint8(0))
+
+
 def clean_ink(rect_bgr: np.ndarray, mode: str = "soft-gray", threshold_bias: int = 16) -> tuple[np.ndarray, dict[str, np.ndarray], float]:
     gray = cv2.cvtColor(rect_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
     gray8 = np.clip(gray, 0, 255).astype(np.uint8)
@@ -843,6 +877,9 @@ def clean_ink(rect_bgr: np.ndarray, mode: str = "soft-gray", threshold_bias: int
     # while preserving long/thin musical lines.
     mask = remove_small_components(mask, min_area=10)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((2, 2), np.uint8), iterations=1)
+    # Drop isolated perimeter speckle so the glare-robust solid-black ink tone
+    # doesn't render edge-illumination noise as visible grain on clean paper.
+    mask = despeckle_isolated(mask, big_area=150, protect_radius=15)
 
     support = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1).astype(bool)
     # Reach full ink over a wider, brighter band so entire stroke bodies render
