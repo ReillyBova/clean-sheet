@@ -981,6 +981,8 @@ def process_page(
     cleaned_pre_straighten = cleaned
     align_info = None
     shear_info = None
+    rightsq_info = None
+    center_info = None
     cleaned_pre_align = cleaned
     if straighten:
         cleaned_pre_straighten = cleaned.copy()
@@ -988,6 +990,8 @@ def process_page(
         cleaned, shear_info = flatscan_dewarp.deskew_barlines(cleaned)
         cleaned_pre_align = cleaned.copy()
         cleaned, align_info = flatscan_dewarp.align_system_margins(cleaned)
+        cleaned, rightsq_info = flatscan_dewarp.align_right_margin(cleaned)
+        cleaned, center_info = flatscan_dewarp.center_content(cleaned)
 
     if debug_dir is not None:
         d = debug_dir / f"page_{page_num_1based:04d}"
@@ -1027,6 +1031,8 @@ def process_page(
             f.write(f"straighten={straighten_info}\n")
             f.write(f"shear={shear_info}\n")
             f.write(f"align={align_info}\n")
+            f.write(f"rightsq={rightsq_info}\n")
+            f.write(f"center={center_info}\n")
             if crease is not None:
                 f.write(f"crease=side:{crease['side']},score:{crease['score']:.1f}\n")
             else:

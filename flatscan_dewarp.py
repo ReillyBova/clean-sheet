@@ -532,3 +532,159 @@ def deskew_barlines(gray: np.ndarray, max_shift_factor: float = 8.0,
                     borderMode=cv2.BORDER_CONSTANT, borderValue=255)
     info.update(applied=True)
     return out, info
+
+
+def _staff_hextents(gray: np.ndarray, min_lines: int = 3):
+    """Per-system staff-line left AND right x extents, plus (ytop, ybot) bands.
+
+    Like ``_staff_left_margins`` but also returns the rightmost column carrying
+    at least ``min_lines`` staff lines. Staff lines are drawn edge-to-edge across
+    a system regardless of the notes in it, so these extents trace the true music
+    block width -- robust to rehearsal marks, measure numbers and marginalia that
+    corrupt a naive ink bounding box.
+    """
+    bw = (gray < 150).astype(np.uint8) * 255
+    thickness, space = _staff_metrics(bw)
+    horiz = _emphasize(bw, thickness)
+    systems = _find_systems(horiz, space)
+    lefts: list[float] = []
+    rights: list[float] = []
+    bands: list[tuple[int, int]] = []
+    for (ytop, ybot) in systems:
+        band = horiz[ytop:ybot, :]
+        rowproj = (band > 0).sum(1).astype(np.float32)
+        if rowproj.max() <= 0:
+            continue
+        line_rows = np.where(rowproj > rowproj.max() * 0.4)[0]
+        if len(line_rows) < min_lines:
+            continue
+        col_line_count = (band[line_rows, :] > 0).sum(0)
+        xs = np.where(col_line_count >= min_lines)[0]
+        if len(xs) == 0:
+            continue
+        lefts.append(float(xs.min()))
+        rights.append(float(xs.max()))
+        bands.append((ytop, ybot))
+    return np.array(lefts, np.float32), np.array(rights, np.float32), bands, space
+
+
+def center_content(gray: np.ndarray, min_imbalance_px: float = 24.0,
+                   max_shift_frac: float = 0.06):
+    """Balance the music block's left/right margins on the page. Returns
+    ``(output_gray, info)``.
+
+    Rectification maps the detected page edges to the output rectangle, so any
+    asymmetry in where those edges landed -- most often a booklet crease clipped
+    a hair inside one margin -- leaves the music sitting off-centre. We measure
+    the staff-line block (median per-system left/right extents, robust to
+    indents and marginalia) and translate the whole page horizontally so the two
+    margins match. Bounded and guarded: skips a already-balanced page, caps the
+    shift, and never pushes content past an edge.
+    """
+    h, w = gray.shape
+    lefts, rights, bands, space = _staff_hextents(gray)
+    info: dict = dict(reason="ok", nsys=int(len(lefts)))
+    if len(lefts) < 3:
+        info.update(applied=False, reason="too few systems")
+        return gray, info
+
+    block_left = float(np.median(lefts))
+    block_right = float(np.median(rights))
+    left_margin = block_left
+    right_margin = (w - 1) - block_right
+    info["left_margin"] = left_margin
+    info["right_margin"] = right_margin
+    shift = (right_margin - left_margin) / 2.0  # >0 moves content right
+    info["imbalance_px"] = float(left_margin - right_margin)
+
+    if abs(left_margin - right_margin) < min_imbalance_px:
+        info.update(applied=False, reason="already centered")
+        return gray, info
+    cap = max_shift_frac * w
+    # shift>0 moves right (shrinks right margin); shift<0 moves left (shrinks
+    # left margin). Keep at least a 2px margin on the shrinking side, and cap.
+    lo = max(-(left_margin - 2.0), -cap)
+    hi = min(right_margin - 2.0, cap)
+    shift = float(np.clip(shift, lo, hi))
+    if abs(shift) < 1.0:
+        info.update(applied=False, reason="shift negligible")
+        return gray, info
+    info["shift"] = shift
+
+    map_x = (np.arange(w, dtype=np.float32)[None, :] - np.float32(shift))
+    map_x = np.repeat(map_x, h, axis=0)
+    map_y = np.repeat(np.arange(h, dtype=np.float32)[:, None], w, axis=1)
+    out = cv2.remap(gray, map_x, map_y, cv2.INTER_CUBIC,
+                    borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+    info.update(applied=True)
+    return out, info
+
+
+def align_right_margin(gray: np.ndarray, min_dev_px: float = 10.0,
+                       max_stretch: float = 0.08):
+    """Square up the crease-side (right) staff-line margin. Returns
+    ``(output_gray, info)``.
+
+    Photographing a bound book compresses the page as it curves into the spine,
+    so on a verso capture each system's right (binding-side) end lands at a
+    slightly different x -- the right edge "dances" system to system even after
+    the staves are level. Staff lines are drawn to a common right margin, so we
+    take that as ground truth: for each system we horizontally scale about its
+    own (already de-drifted) left edge so its right staff extent reaches a common
+    target R. Scale is constant within a staff band (bar lines stay vertical,
+    staves stay horizontal) and blended through the gaps.
+
+    Left edges -- and any intentional indents living in them -- are the scaling
+    anchor and are never moved. On a page whose right margin is already
+    consistent (recto/flat scans) the per-system deviation is tiny and this
+    no-ops. Bounded: needs enough systems and caps the per-system stretch.
+    """
+    h, w = gray.shape
+    lefts, rights, bands, space = _staff_hextents(gray)
+    info: dict = dict(reason="ok", nsys=int(len(lefts)))
+    if len(lefts) < 4:
+        info.update(applied=False, reason="too few systems")
+        return gray, info
+
+    target_r = float(np.median(rights))
+    dev = float(np.std(rights))
+    info["right_std_before"] = dev
+    info["target_r"] = target_r
+    if float(np.max(np.abs(rights - target_r))) < min_dev_px:
+        info.update(applied=False, reason="right margin already square")
+        return gray, info
+
+    # Per-system horizontal affine map_x = alpha + beta * x, anchored at left_i so
+    # the right extent right_i maps to target_r:
+    #   beta_i  = (right_i - left_i) / (target_r - left_i)   (input span / output span)
+    #   alpha_i = left_i * (1 - beta_i)
+    order = np.argsort([b[0] for b in bands])
+    tops = np.array([bands[i][0] for i in order], np.float32)
+    bots = np.array([bands[i][1] for i in order], np.float32)
+    li = lefts[order]
+    ri = rights[order]
+    denom = np.maximum(target_r - li, 1.0)
+    beta = (ri - li) / denom
+    lo, hi = 1.0 / (1.0 + max_stretch), 1.0 + max_stretch
+    beta = np.clip(beta, lo, hi)
+    alpha = li * (1.0 - beta)
+
+    # Constant within each band, linearly blended across gaps (mirror of the
+    # vertical straightener / left de-drift control-point scheme).
+    yk = np.empty(2 * len(tops), np.float32)
+    yk[0::2] = tops
+    yk[1::2] = bots
+    yk = np.maximum.accumulate(yk) + np.arange(len(yk)) * 1e-3
+    ak = np.empty(2 * len(tops), np.float32); ak[0::2] = alpha; ak[1::2] = alpha
+    bk = np.empty(2 * len(tops), np.float32); bk[0::2] = beta;  bk[1::2] = beta
+    ys = np.arange(h, dtype=np.float32)
+    a_row = np.interp(ys, yk, ak, left=ak[0], right=ak[-1]).astype(np.float32)
+    b_row = np.interp(ys, yk, bk, left=bk[0], right=bk[-1]).astype(np.float32)
+
+    xs = np.arange(w, dtype=np.float32)[None, :]
+    map_x = (a_row[:, None] + b_row[:, None] * xs).astype(np.float32)
+    map_y = np.repeat(ys[:, None], w, axis=1)
+    out = cv2.remap(gray, map_x, map_y, cv2.INTER_CUBIC,
+                    borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+    info.update(applied=True, max_stretch=float(np.abs(beta - 1.0).max()))
+    return out, info
