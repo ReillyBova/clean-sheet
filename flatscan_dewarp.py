@@ -869,13 +869,25 @@ def align_right_margin(gray: np.ndarray, min_dev_px: float = 10.0,
         info.update(applied=False, reason="too few systems")
         return gray, info
 
-    # Target a low percentile of the staff-right extents and only ever pull wide
-    # systems *inward*. Stretching a system outward pushes any content beyond its
-    # staff line (end ties, the final slur) toward -- and past -- the page margin,
-    # which reads as the top systems overflowing the page; and a "short" staff
-    # extent is often just the crease fade fooling the detector, so stretching to
-    # match it is doubly wrong. Compression-only alignment squares the margin
-    # without ever driving content off the page.
+    # Re-measure each system's right edge from *content*, not the staff line.
+    # The staff line fades where it curves into the binding, so the staff-line
+    # detector under-reads the right extent of the crease-most systems -- and
+    # then compression-only alignment (below) pulls every *other* system in while
+    # leaving those under-read ones out, so they visibly protrude. The rightmost
+    # inked column in the staff band is fade-immune and marks the true right edge
+    # (final barline / note), giving a consistent measure across all systems.
+    ink = (gray < 100)
+    rights = rights.astype(np.float64).copy()
+    for i, (ytop, ybot) in enumerate(bands):
+        band = ink[int(ytop):int(ybot)]
+        cols = np.where(band.sum(0) > 1)[0]
+        if len(cols):
+            rights[i] = float(cols.max())
+
+    # Target a low percentile of the right edges and only ever pull wide systems
+    # *inward*. Stretching a system outward would push content past the page
+    # margin (top systems overflowing). Compression-only alignment squares the
+    # margin without ever driving content off the page.
     target_r = float(np.percentile(rights, 30))
     dev = float(np.std(rights))
     info["right_std_before"] = dev
