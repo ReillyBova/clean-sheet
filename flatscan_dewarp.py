@@ -347,11 +347,12 @@ def _staff_guided_displacement(gray: np.ndarray, max_disp_factor: float = 8.0):
     map_y = Yfull[ki] * (1 - frac) + Yfull[ki + 1] * frac
     above = yout < T[0]; below = yout > T[-1]
     if above.any():
-        slope = (Yfull[1] - Yfull[0]) / (T[1] - T[0] + 1e-6)
-        map_y[above] = Yfull[0][None, :] + (yout[above, None] - T[0]) * slope[None, :]
+        # Hold the top line's displacement constant above it -- translate the
+        # header/above-staff region rigidly rather than extrapolating a slope,
+        # which would shear content (page numbers, tempo marks, footers).
+        map_y[above] = yout[above, None] + (Yfull[0] - T[0])[None, :]
     if below.any():
-        slope = (Yfull[-1] - Yfull[-2]) / (T[-1] - T[-2] + 1e-6)
-        map_y[below] = Yfull[-1][None, :] + (yout[below, None] - T[-1]) * slope[None, :]
+        map_y[below] = yout[below, None] + (Yfull[-1] - T[-1])[None, :]
     map_y = map_y.astype(np.float32)
     np.maximum.accumulate(map_y, axis=0, out=map_y)
 
