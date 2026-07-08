@@ -768,11 +768,32 @@ def draw_source_uv_grid(img_bgr: np.ndarray, edges: dict[str, np.ndarray], sampl
     return overlay
 
 
-def rectify_boundary_coons(img_bgr: np.ndarray, mask: np.ndarray, out_w: int, out_h: int, smooth: float) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+def inset_edges(edges: dict[str, np.ndarray], frac: float) -> dict[str, np.ndarray]:
+    """Shrink the boundary quad slightly toward its centroid.
+
+    Segmentation places the page boundary in the soft reflectance ramp at the
+    paper's physical edge, so the rectifier samples a 1-3px sliver of the dark
+    surround/edge-shadow at the very border. After ink cleanup that sliver
+    becomes a hard near-black line down the outer edge, which reads as a skewed,
+    lopsided page. The outermost fraction of a music page is always margin (staff
+    content never reaches the physical sheet edge), so nudging every edge inward
+    a hair excludes the dark border for all four sides without touching content.
+    Because every point is scaled about the shared centroid by the same factor,
+    corners stay consistent and the Coons patch remains valid.
+    """
+    allpts = np.concatenate([edges[k] for k in ('top', 'bottom', 'left', 'right')], axis=0)
+    c = allpts.mean(axis=0)
+    s = 1.0 - frac
+    return {k: (c + s * (v - c)).astype(np.float32) for k, v in edges.items()}
+
+
+def rectify_boundary_coons(img_bgr: np.ndarray, mask: np.ndarray, out_w: int, out_h: int, smooth: float, inset_frac: float = 0.005) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     contour = largest_external_contour(mask)
     corners = find_corners_from_contour(contour)
     raw_edges = split_into_edges(contour, corners)
     edges = orient_edges(raw_edges, corners, n=1200, smooth=smooth)
+    if inset_frac > 0:
+        edges = inset_edges(edges, inset_frac)
     rect = remap_coons_chunked(img_bgr, edges, out_w, out_h)
     return rect, edges
 
