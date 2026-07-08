@@ -442,6 +442,140 @@ def segment_page(img_bgr: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]
     return mask, debug
 
 
+def detect_crease(
+    img_bgr: np.ndarray,
+    mask: np.ndarray,
+    min_score: float = 6.0,
+    touch_frac: float = 0.02,
+) -> dict | None:
+    """Locate the book-fold crease on the binding side of a half-spread scan.
+
+    In "booklet" captures each photo shows one page plus the fold into the spine,
+    and a sliver of the facing page frequently bleeds in past the fold. That bleed
+    corrupts the page boundary (the Coons patch reaches into the neighbour and the
+    binding-side edge buckles). Detecting the crease lets us redraw that one page
+    edge along the fold so the neighbour is excluded and the edge comes out clean.
+
+    Which side is the binding is decided by geometry, not guesswork: a booklet
+    half-spread always runs off into the spine on one L/R side, so the paper mask
+    reaches the image border there with no table margin. A full flat sheet (e.g. a
+    title page) is instead "floating" — table background surrounds it on all four
+    sides — even when it carries an internal fold shadow. A floating page is never
+    clipped, which protects full sheets whose content straddles the fold.
+
+    Given the binding side, the crease itself reads as a faint, near-vertical
+    *valley*: a dark fold-shadow line flanked by bright paper on both sides. We
+    suppress the ink (grayscale close), blur, then apply a matched valley filter
+    ``roll(+d) + roll(-d) - 2*sm`` whose response peaks on exactly that profile.
+    A paper->table step edge is bright-on-one-side only, so it is ignored.
+
+    Returns ``None`` for a floating sheet or when no confident crease valley is
+    found on the binding side. Otherwise returns ``{side, curve, score}`` where
+    ``side`` is ``"left"``/``"right"`` and ``curve`` is a per-row array of crease
+    x-positions (the fold bends, so it is not a straight line).
+    """
+    h, w = img_bgr.shape[:2]
+    m = mask > 0
+    if not m.any():
+        return None
+
+    ys, xs = np.where(m)
+    x0, x1 = int(xs.min()), int(xs.max())
+    pw = x1 - x0
+    if pw <= 0:
+        return None
+
+    # Binding side = the L/R side where the paper runs off the frame (no table
+    # margin). Floating pages (margin on both sides) are full sheets -> no clip.
+    touch_px = max(2, int(round(touch_frac * w)))
+    touch_l = x0 <= touch_px
+    touch_r = x1 >= (w - 1 - touch_px)
+    if not touch_l and not touch_r:
+        return None
+
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    # Suppress ink so the broad fold shadow is the dominant dark feature, then
+    # blur to a smooth low-frequency field the valley filter can measure.
+    close_k = max(9, (min(h, w) // 120) | 1)
+    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k, close_k))
+    noink = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, ker)
+    sm = cv2.GaussianBlur(noink.astype(np.float32), (0, 0), sigmaX=25, sigmaY=25)
+
+    d = max(25, (w // 60) | 1)
+    valley = np.roll(sm, d, axis=1) + np.roll(sm, -d, axis=1) - 2.0 * sm
+    valley[:, :d] = 0.0
+    valley[:, -d:] = 0.0
+    valley[~m] = 0.0
+
+    rows = m.any(axis=1)
+    yy = np.arange(h)
+
+    def scan(lo: float, hi: float) -> tuple[np.ndarray, np.ndarray, float]:
+        a = int(x0 + lo * pw)
+        b = max(int(x0 + hi * pw), a + 1)
+        seg = valley[:, a:b]
+        idx = np.argmax(seg, axis=1) + a
+        val = seg[yy, idx - a]
+        return idx, val, float(np.median(val[rows]))
+
+    # Scan the binding-side third(s). When only one side touches the frame we
+    # scan just that side; if both touch (page fills the width) pick the stronger.
+    candidates = []
+    if touch_l:
+        li, lv, ls = scan(0.03, 0.40)
+        candidates.append(("left", li, lv, ls))
+    if touch_r:
+        ri, rv, rs = scan(0.60, 0.97)
+        candidates.append(("right", ri, rv, rs))
+    side, idx, val, score = max(candidates, key=lambda c: c[3])
+    if score < min_score:
+        return None
+
+    # Fit a smooth curve through the confident rows (the fold bends). A low-order
+    # polynomial rejects per-row noise while tracking the gentle curvature.
+    strong = rows & (val > 0.5 * max(np.median(val[rows]), 1e-6))
+    if int(strong.sum()) < 8:
+        return None
+    coef = np.polyfit(yy[strong], idx[strong].astype(np.float64), 3)
+    curve = np.clip(np.polyval(coef, yy), 0, w - 1)
+
+    return {"side": side, "curve": curve, "score": score}
+
+
+def clip_mask_at_crease(mask: np.ndarray, crease: dict) -> np.ndarray:
+    """Drop everything past the crease on its side, so the fold becomes the edge.
+
+    This removes the bled-in facing page and hands the Coons patch a clean, smooth
+    binding edge to map onto the straight output border. Content on the page's own
+    side of the fold is untouched.
+    """
+    out = mask.copy()
+    h = mask.shape[0]
+    side = crease["side"]
+    xs = np.round(crease["curve"]).astype(np.int32)
+    for y in range(h):
+        cx = int(xs[y])
+        if side == "right":
+            out[y, cx:] = 0
+        else:
+            out[y, : cx + 1] = 0
+    # A clean cut can leave a disconnected neighbour speck on the far side; keep
+    # only the dominant page component so the boundary is a single clean contour.
+    return largest_component(out)
+
+
+def crease_overlay(img_bgr: np.ndarray, crease: dict) -> np.ndarray:
+    """Draw the detected crease curve for debug inspection."""
+    vis = img_bgr.copy()
+    h = vis.shape[0]
+    xs = np.round(crease["curve"]).astype(np.int32)
+    for y in range(0, h, 2):
+        x = int(xs[y])
+        if 0 <= x < vis.shape[1]:
+            cv2.circle(vis, (x, y), 2, (255, 0, 0), -1)
+    return vis
+
+
 def mask_overlay(img_bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
     tint = np.zeros_like(img_bgr)
     tint[:, :, 1] = 255
@@ -763,8 +897,12 @@ def process_page(
     threshold_bias: int,
     debug_dir: Path | None,
     straighten: bool = False,
+    booklet: bool = False,
 ) -> np.ndarray:
     mask, seg_debug = segment_page(img_bgr)
+    crease = detect_crease(img_bgr, mask) if booklet else None
+    if crease is not None:
+        mask = clip_mask_at_crease(mask, crease)
     rect, edges = rectify_boundary_coons(img_bgr, mask, out_w, out_h, boundary_smooth)
     cleaned, ink_debug, thr = clean_ink(rect, mode=mode, threshold_bias=threshold_bias)
 
@@ -784,6 +922,8 @@ def process_page(
         imwrite(d / "00_input_render.png", img_bgr)
         imwrite(d / "06_page_mask.png", mask)
         imwrite(d / "07_page_mask_overlay.png", mask_overlay(img_bgr, mask))
+        if crease is not None:
+            imwrite(d / "05_crease_overlay.png", crease_overlay(img_bgr, crease))
         for name, arr in seg_debug.items():
             imwrite(d / name, arr)
         uv = draw_source_uv_grid(img_bgr, edges)
@@ -813,6 +953,10 @@ def process_page(
             f.write(f"output_pixels={out_w}x{out_h}\n")
             f.write(f"straighten={straighten_info}\n")
             f.write(f"align={align_info}\n")
+            if crease is not None:
+                f.write(f"crease=side:{crease['side']},score:{crease['score']:.1f}\n")
+            else:
+                f.write(f"crease={'none' if booklet else 'off'}\n")
     return cleaned
 
 
@@ -846,6 +990,7 @@ def _render_clean_save_page(task: dict) -> int:
         threshold_bias=task["threshold_bias"],
         debug_dir=task["debug_dir"],
         straighten=task.get("straighten", False),
+        booklet=task.get("booklet", False),
     )
     save_output_image(cleaned, task["page_png"])
     del img, cleaned
@@ -943,6 +1088,7 @@ def process_document(
             "threshold_bias": args.threshold_bias,
             "debug_dir": debug_root if (args.debug and idx in debug_pages) else None,
             "straighten": getattr(args, "straighten", False),
+            "booklet": getattr(args, "booklet", False),
         }
 
     workers = min(jobs, len(todo)) if todo else 0
@@ -1090,6 +1236,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--mode", choices=["soft-gray", "soft-black", "binary", "normalized-gray"], default="soft-gray", help="Final output style")
     ap.add_argument("--boundary-smooth", type=float, default=0.045, help="Boundary curve smoothing fraction for Coons warp")
     ap.add_argument("--straighten", action="store_true", help="Opt-in: after rectification, straighten wavy/skewed staff lines using detected staves (best for sheet music). Safely no-ops on pages without clear staves")
+    ap.add_argument("--booklet", action="store_true", help="Opt-in: half-spread/booklet captures where one L/R edge folds into the spine and the facing page bleeds in. Detects the fold crease and clips the page there so the neighbour is excluded and the binding edge comes out clean. Full flat sheets in view (e.g. title pages) are left whole")
     ap.add_argument("--threshold-bias", type=int, default=16, help="Ink threshold adjustment; lower keeps less ink/noise, higher keeps more faint ink")
     ap.add_argument("--debug", action="store_true", help="Write intermediate masks/UV grids/alternate outputs")
     ap.add_argument("--debug-dir", type=Path, default=None, help="Directory for debug outputs; defaults to <output_stem>_debug")
