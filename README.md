@@ -207,3 +207,10 @@ a live run.
 
 No build step is required — three.js loads from a CDN, and a `.nojekyll` file lets
 Pages serve the assets as-is.
+
+## Design docs
+
+The *why* behind the code — problems hit, approaches tried and rejected, and the
+invariants we hold — lives in [`design/`](design/README.md): the
+[converter pipeline](design/01-converter.md), the [demo website](design/02-website.md),
+and the planned [live integration](design/03-live-integration.md).
