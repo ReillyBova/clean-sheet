@@ -270,7 +270,29 @@ def _trace_staff_lines(gray: np.ndarray):
     horiz = (emph > 0).astype(np.uint8)
     systems = _find_systems(emph, space)
     xcs = np.arange(0, w, 6)
+    # Raw threshold as a fallback signal. Near the binding the staff lines curl
+    # and foreshorten, and the horizontal-opening emphasis (which needs a long
+    # straight run) stops catching them -- so a comb-following trace would go
+    # blind exactly where the bend is worst and hold its last value flat, which
+    # then makes the straightener over/under-correct the very edge. Where the
+    # emphasized signal is missing we fall back to the raw ink nearest the line
+    # so the trace keeps following the real (sloped) line to the page edge.
+    raw = (bw > 0).astype(np.uint8)
     win = max(3, int(round(space * 0.45)))
+
+    def step(prev: float, xc: int) -> float:
+        lo = max(0, int(prev - win)); hi = int(prev + win)
+        seg = np.where(horiz[lo:hi, xc] > 0)[0]
+        if len(seg):
+            return lo + float(np.median(seg))
+        seg = np.where(raw[lo:hi, xc] > 0)[0]
+        if len(seg):
+            # pick the raw ink nearest the predicted line (robust to a note head
+            # or ledger line sitting elsewhere inside the window)
+            ys = lo + seg
+            return float(ys[int(np.argmin(np.abs(ys - prev)))])
+        return prev
+
     out = []
     for (ytop, ybot) in systems:
         cx0, cx1 = int(w * 0.40), int(w * 0.60)
@@ -286,18 +308,10 @@ def _trace_staff_lines(gray: np.ndarray):
         for ki, p in enumerate(seeds):
             prev = float(p); L[ki, ci] = p
             for j in range(ci + 1, len(xcs)):
-                lo = max(0, int(prev - win)); hi = int(prev + win)
-                seg = np.where(horiz[lo:hi, xcs[j]] > 0)[0]
-                if len(seg):
-                    prev = lo + float(np.median(seg))
-                L[ki, j] = prev
+                prev = step(prev, xcs[j]); L[ki, j] = prev
             prev = float(p)
             for j in range(ci - 1, -1, -1):
-                lo = max(0, int(prev - win)); hi = int(prev + win)
-                seg = np.where(horiz[lo:hi, xcs[j]] > 0)[0]
-                if len(seg):
-                    prev = lo + float(np.median(seg))
-                L[ki, j] = prev
+                prev = step(prev, xcs[j]); L[ki, j] = prev
         L = np.sort(L, axis=0)  # forbid crossings
         k = 7  # light along-x smoothing kills jitter, keeps the real bend
         for ki in range(L.shape[0]):
