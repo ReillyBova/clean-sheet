@@ -53,14 +53,6 @@ async function boot() {
   setPhase(0, true);
 
   window.addEventListener("resize", () => state.cine && state.cine.resize());
-  if (window.ResizeObserver) {
-    new ResizeObserver(() => state.cine && state.cine.resize()).observe(els.viewport);
-  }
-  // re-fit once fonts/layout settle so the drawing buffer matches the final box
-  if (document.fonts && document.fonts.ready) {
-    document.fonts.ready.then(() => state.cine && state.cine.resize());
-  }
-  window.addEventListener("load", () => state.cine && state.cine.resize());
   els.playBtn.addEventListener("click", () => setPlaying(!state.playing));
   els.replayBtn.addEventListener("click", () => { seek(0); setPlaying(true); });
   els.track.addEventListener("click", (e) => {

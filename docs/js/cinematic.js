@@ -25,10 +25,12 @@ export class Cinematic {
     const aspect = H / W;
     this.aspect = aspect;
 
-    // cover-fit flat plate (matches the ink still)
-    const outWH = demo.output_aspect;
-    const plateH = 1.0 / outWH, plateW = 1.0;
-    const px0 = 0, px1 = plateW;
+    // contain-fit flat plate — the whole page (title → footer) stays in frame
+    const outWH = demo.output_aspect;      // page width / height
+    const fill = 0.98;                      // leave a hair of margin
+    let plateW = fill, plateH = plateW / outWH;
+    if (plateH > aspect * fill) { plateH = aspect * fill; plateW = plateH * outWH; }
+    const px0 = (1 - plateW) / 2, px1 = px0 + plateW;
     const py0 = (aspect - plateH) / 2, py1 = py0 + plateH;
 
     const N = GW * GH;
@@ -63,19 +65,29 @@ export class Cinematic {
     this.photoTex = mkTex(photoImg);
     this.inkTex = inkImg ? mkTex(inkImg) : null;
 
-    // background: full photo quad (page + surround), fixed
+    // background: full photo quad (page + surround), fixed.
+    // Built explicitly to match the page mesh's (position, uv) convention:
+    // position (su, sv*aspect) with su/sv in [0,1] top-left→bottom-right, uv (su, 1-sv).
     {
-      const g = new THREE.PlaneGeometry(1, aspect);
-      const pos = g.attributes.position;
-      // PlaneGeometry is centered; move to fill [0,1]x[0,aspect] in y-down space
-      for (let i = 0; i < pos.count; i++) {
-        pos.setXYZ(i, pos.getX(i) + 0.5, (0.5 - pos.getY(i)) * aspect, -0.2);
-      }
-      // uv already 0..1 but y flipped for y-down: flip v
-      const uv = g.attributes.uv;
-      for (let i = 0; i < uv.count; i++) uv.setY(i, 1 - uv.getY(i));
-      this.bgMat = new THREE.MeshBasicMaterial({ map: this.photoTex, transparent: true });
-      this.bg = new THREE.Mesh(g, this.bgMat);
+      const bgGeo = new THREE.BufferGeometry();
+      const z = -0.2;
+      const bp = new Float32Array([
+        0, 0, z,          // TL
+        1, 0, z,          // TR
+        0, aspect, z,     // BL
+        1, aspect, z,     // BR
+      ]);
+      const buv = new Float32Array([
+        0, 1,   // TL
+        1, 1,   // TR
+        0, 0,   // BL
+        1, 0,   // BR
+      ]);
+      bgGeo.setAttribute("position", new THREE.BufferAttribute(bp, 3));
+      bgGeo.setAttribute("uv", new THREE.BufferAttribute(buv, 2));
+      bgGeo.setIndex([0, 2, 1, 1, 2, 3]);
+      this.bgMat = new THREE.MeshBasicMaterial({ map: this.photoTex, transparent: true, side: THREE.DoubleSide });
+      this.bg = new THREE.Mesh(bgGeo, this.bgMat);
       this.scene.add(this.bg);
     }
 
