@@ -13,7 +13,7 @@ const sstep = (a, b, x) => {
 };
 const lerp = (a, b, t) => a + (b - a) * t;
 
-const GOLD = 0xe0a94a, GOLD_SOFT = 0xf0cd8a;
+const GOLD = 0xe0a94a, GOLD_SOFT = 0xf0cd8a, AMBER = 0xf2a327;
 
 export class Cinematic {
   constructor(canvas) { this.canvas = canvas; this.ready = false; }
@@ -25,11 +25,11 @@ export class Cinematic {
     const aspect = H / W;
     this.aspect = aspect;
 
-    // contain-fit flat plate — the whole page (title → footer) stays in frame
+    // contain-fit flat plate — cover the frame so its edges sit flush with the
+    // viewport (page/frame aspects match within ~1%, so the tiny top/bottom
+    // bleed lives under the rounded corners; nothing meaningful is cropped).
     const outWH = demo.output_aspect;      // page width / height
-    const fill = 0.98;                      // leave a hair of margin
-    let plateW = fill, plateH = plateW / outWH;
-    if (plateH > aspect * fill) { plateH = aspect * fill; plateW = plateH * outWH; }
+    const plateW = 1.0, plateH = Math.max(aspect, 1.0 / outWH);
     const px0 = (1 - plateW) / 2, px1 = px0 + plateW;
     const py0 = (aspect - plateH) / 2, py1 = py0 + plateH;
 
@@ -134,7 +134,7 @@ export class Cinematic {
     this.hlGeo = new THREE.BufferGeometry();
     this.hlGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(N * 3), 3));
     this.hlGeo.setIndex(indices);
-    this.hlMat = new THREE.MeshBasicMaterial({ color: GOLD_SOFT, transparent: true, opacity: 0, depthWrite: false });
+    this.hlMat = new THREE.MeshBasicMaterial({ color: GOLD, transparent: true, opacity: 0, depthWrite: false });
     this.hl = new THREE.Mesh(this.hlGeo, this.hlMat);
     this.hl.position.z = 0.01;
     this.scene.add(this.hl);
@@ -152,16 +152,26 @@ export class Cinematic {
     this.outline.position.z = 0.03;
     this.scene.add(this.outline);
 
-    // interior UV grid (vertical then horizontal lines, draws on, morphs)
-    this.gridPairs = [];
+    // interior UV grid — both axes reveal together as one diagonal wavefront
+    // sweeping from the top-left corner across the page (3B1B-style). Segments
+    // are sorted by their normalized distance from that corner so setDrawRange
+    // paints them in that order.
     const stepI = 4, stepJ = 5;
+    const cornerKey = (a, b) => {
+      const ia = a % GW, ja = (a / GW) | 0, ib = b % GW, jb = (b / GW) | 0;
+      return (ia + ib) / 2 / (GW - 1) + (ja + jb) / 2 / (GH - 1);
+    };
+    const segs = [];
     for (let i = stepI; i < GW - 1; i += stepI)
-      for (let j = 0; j < GH - 1; j++) this.gridPairs.push(j * GW + i, (j + 1) * GW + i);
+      for (let j = 0; j < GH - 1; j++) segs.push([j * GW + i, (j + 1) * GW + i]);
     for (let j = stepJ; j < GH - 1; j += stepJ)
-      for (let i = 0; i < GW - 1; i++) this.gridPairs.push(j * GW + i, j * GW + i + 1);
+      for (let i = 0; i < GW - 1; i++) segs.push([j * GW + i, j * GW + i + 1]);
+    segs.sort((p, q) => cornerKey(p[0], p[1]) - cornerKey(q[0], q[1]));
+    this.gridPairs = [];
+    for (const [a, b] of segs) this.gridPairs.push(a, b);
     this.gridGeo = new THREE.BufferGeometry();
     this.gridGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(this.gridPairs.length * 3), 3));
-    this.gridMat = new THREE.LineBasicMaterial({ color: GOLD, transparent: true, opacity: 0 });
+    this.gridMat = new THREE.LineBasicMaterial({ color: AMBER, transparent: true, opacity: 0 });
     this.grid = new THREE.LineSegments(this.gridGeo, this.gridMat);
     this.grid.position.z = 0.025;
     this.scene.add(this.grid);
@@ -222,20 +232,18 @@ export class Cinematic {
     this._g = g;
 
     // --- phase envelopes (overlapping = continuous) ---
-    const morphT   = sstep(0.44, 0.70, g);
-    const lift     = Math.sin(sstep(0.44, 0.70, g) * Math.PI) * 0.05;
-    const hlOp     = (sstep(0.10, 0.18, g) - sstep(0.40, 0.48, g)) * 0.20;
+    const morphT   = sstep(0.42, 0.72, g);              // constrained un-warp, no overshoot
+    const hlOp     = (sstep(0.08, 0.18, g) - sstep(0.38, 0.48, g)) * 0.34;
     const outDraw  = sstep(0.14, 0.28, g);
-    const gridDraw = sstep(0.28, 0.44, g);
-    const linesOut = 1 - sstep(0.60, 0.70, g);         // grid+outline fade as it flattens
-    const outOp    = (sstep(0.14, 0.20, g)) * linesOut;
-    const gridOp   = (sstep(0.28, 0.34, g)) * linesOut * 0.9;
-    const bgFade   = 1 - sstep(0.44, 0.66, g) * 0.92;   // table darkens as page lifts
+    const gridDraw = sstep(0.26, 0.46, g);              // slower diagonal corner sweep
+    const linesOut = 1 - sstep(0.62, 0.72, g);          // grid+outline fade as it flattens
+    const outOp    = sstep(0.14, 0.20, g) * linesOut;
+    const gridOp   = sstep(0.26, 0.32, g) * linesOut;
+    const bgFade   = 1 - sstep(0.42, 0.66, g) * 0.95;   // background darkens as page lifts
     const inkOp    = sstep(0.72, 0.90, g);
-    const rise     = 1 + sstep(0.46, 0.66, g) * 0.035;  // subtle scale up
-    const push     = 1 + sstep(0.0, 0.42, g) * 0.03;    // early ken-burns on the whole scene
+    const push     = 1 + sstep(0.0, 0.42, g) * 0.03;    // gentle ken-burns on the capture
 
-    this._writePositions(morphT, lift);
+    this._writePositions(morphT, 0);
 
     this.hlMat.opacity = Math.max(0, hlOp);
     this.outMat.opacity = Math.max(0, outOp);
@@ -250,12 +258,11 @@ export class Cinematic {
     this.outGeo.setDrawRange(0, Math.max(2, Math.floor(this.perim.length * outDraw)));
     this.gridGeo.setDrawRange(0, Math.max(0, Math.floor((this.gridPairs.length / 2) * gridDraw) * 2));
 
-    // rise (scale the rig about the plate center)
+    // the flat page rests exactly on its plate — no scale overshoot
+    this.rig.position.set(0, 0, 0);
+    this.rig.scale.set(1, 1, 1);
+    // early ken-burns on the background capture only
     const cx = 0.5, cy = this.aspect / 2;
-    const sc = rise * push;
-    this.rig.position.set(cx - cx * sc, cy - cy * sc, 0);
-    this.rig.scale.set(sc, sc, 1);
-    // early push on background too
     this.bg.scale.set(push, push, 1);
     this.bg.position.set(cx - cx * push, cy - cy * push, -0.2);
 
