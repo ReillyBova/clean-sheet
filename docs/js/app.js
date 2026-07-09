@@ -1,224 +1,120 @@
-// Clean Sheet — showcase orchestration.
-// A single progress clock drives stage cross-fades, captions, the timeline, and
-// the WebGL reprojection morph — so everything is seekable and pausable.
+// Clean Sheet — showcase controller.
+// One continuous progress clock g in [0,1] loops the cinematic shot. Captions and
+// the scrub bar reflect the phase; the whole thing is pausable and seekable.
 
-import { Reprojector } from "./reproject.js";
+import { Cinematic } from "./cinematic.js";
 
 const $ = (s) => document.querySelector(s);
-const smooth = (a, b, x) => {
-  const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
-  return t * t * (3 - 2 * t);
-};
+
+const PHASES = [
+  { key: "capture",  title: "The capture",     blurb: "A phone photo, angled and unevenly lit, curling at the edges — shot on whatever dark surface was handy.", at: 0.0 },
+  { key: "find",     title: "Find the page",   blurb: "The sheet is isolated from its background and its outline traced — no assumption about the surface behind it.", at: 0.13 },
+  { key: "map",      title: "Map the surface", blurb: "A UV grid is fitted to the page, capturing exactly how the paper bends and curls in space.", at: 0.30 },
+  { key: "flatten",  title: "Lift it flat",    blurb: "The page lifts off the background and un-warps — grid, border and all — onto a true, flat rectangle.", at: 0.46 },
+  { key: "clean",    title: "Clean the ink",   blurb: "Uneven lighting is removed and the ink develops into fine, even soft-grayscale — a clean sheet.", at: 0.72 },
+];
+
+const LOOP_MS = 15000;
+const HOLD_MS = 1400;
 
 const els = {
   showcase: $("#showcase"),
   viewport: $("#viewport"),
   gl: $("#gl"),
-  frameA: $("#frameA"),
-  frameB: $("#frameB"),
   title: $("#stageTitle"),
   blurb: $("#stageBlurb"),
   readout: $(".readout"),
-  index: $("#stageIndex"),
-  total: $(".stage-total"),
-  timeline: $("#timeline"),
+  track: $("#track"),
+  fill: $("#trackFill"),
+  ticks: $("#ticks"),
   playBtn: $("#playBtn"),
   playLabel: $("#playLabel"),
   replayBtn: $("#replayBtn"),
 };
 
-// Per-stage durations (ms). The reprojection stage is longer for the morph.
-const DUR = {
-  input: 2600, lighting: 2400, segment: 2400, mask: 2200,
-  uv: 2600, rectified: 3600, ink: 2600, straighten: 3200,
-};
+const state = { g: 0, playing: true, phase: -1, cine: null, last: 0, holding: 0 };
 
-const state = {
-  stages: [],
-  i: 0,
-  t: 0,            // elapsed ms in current stage
-  playing: true,
-  frontIsB: false, // which frame img currently shows
-  repro: null,
-  images: {},      // key -> HTMLImageElement
-  lastTs: 0,
-};
-
-async function loadImage(src) {
-  return new Promise((res, rej) => {
-    const im = new Image();
-    im.onload = () => res(im);
-    im.onerror = rej;
-    im.src = src;
-  });
-}
+const loadImage = (src) => new Promise((res, rej) => {
+  const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src;
+});
 
 async function boot() {
   const demo = await fetch("assets/demo.json").then((r) => r.json());
-  state.stages = demo.stages.map((s) => ({ ...s, dur: DUR[s.key] || 2400 }));
-  els.total.textContent = "/ " + state.stages.length;
+  const [photo, ink] = await Promise.all([
+    loadImage("assets/" + demo.photo.image),
+    loadImage("assets/stages/ink.jpg"),
+  ]);
 
-  // preload stage images + the photo for the mesh
-  const photo = await loadImage("assets/" + demo.photo.image);
-  await Promise.all(
-    state.stages.map(async (s) => {
-      state.images[s.key] = await loadImage(`assets/stages/${s.key}.jpg`);
-    })
-  );
+  state.cine = new Cinematic(els.gl);
+  try { await state.cine.init(demo, photo, ink); } catch (e) { console.warn(e); }
+  els.gl.classList.add("show");
 
-  // set up the reprojector (hero morph); tolerate WebGL being unavailable
-  state.repro = new Reprojector(els.gl);
-  try { await state.repro.init(demo, photo); } catch (e) { console.warn("WebGL morph unavailable:", e); }
-  state.morphOK = !!(state.repro && state.repro.ready);
+  buildTicks();
+  setPhase(0, true);
 
-  buildTimeline();
-  // first frame
-  els.frameA.src = state.images.input.src;
-  els.frameA.classList.add("show");
-  enterStage(0, true);
+  window.addEventListener("resize", () => state.cine && state.cine.resize());
+  els.playBtn.addEventListener("click", () => setPlaying(!state.playing));
+  els.replayBtn.addEventListener("click", () => { seek(0); setPlaying(true); });
+  els.track.addEventListener("click", (e) => {
+    const r = els.track.getBoundingClientRect();
+    seek((e.clientX - r.left) / r.width); setPlaying(true);
+  });
 
-  window.addEventListener("resize", () => state.repro && state.repro.resize());
-  els.playBtn.addEventListener("click", togglePlay);
-  els.replayBtn.addEventListener("click", () => { jumpTo(0); setPlaying(true); });
-
-  // debug: ?stage=N&p=0.5&play=0 to inspect a specific moment
   const q = new URLSearchParams(location.search);
-  if (q.has("stage")) {
-    const si = Math.max(0, Math.min(state.stages.length - 1, +q.get("stage")));
-    jumpTo(si);
-    setPlaying(q.get("play") === "1");
-    if (!state.playing) {
-      const pr = q.has("p") ? Math.max(0, Math.min(1, +q.get("p"))) : 0;
-      state.t = pr * state.stages[si].dur;
-      state.stages[si]._fill.style.width = pr * 100 + "%";
-      if (state.stages[si].key === "rectified" && state.morphOK) updateMorph(pr);
-    }
-  }
+  if (q.has("g")) { seek(+q.get("g")); setPlaying(q.get("play") === "1"); }
 
-  state.lastTs = performance.now();
+  state.last = performance.now();
   requestAnimationFrame(tick);
 }
 
-function buildTimeline() {
-  els.timeline.innerHTML = "";
-  state.stages.forEach((s, idx) => {
+function buildTicks() {
+  els.ticks.innerHTML = "";
+  PHASES.forEach((p) => {
     const b = document.createElement("button");
-    b.className = "tl-dot";
-    b.setAttribute("role", "tab");
-    b.title = s.title;
-    b.innerHTML = '<span class="fill"></span>';
-    b.addEventListener("click", () => { jumpTo(idx); setPlaying(true); });
-    els.timeline.appendChild(b);
-    s._dot = b;
-    s._fill = b.querySelector(".fill");
+    b.className = "tick"; b.title = p.title;
+    b.style.left = p.at * 100 + "%";
+    b.addEventListener("click", (e) => { e.stopPropagation(); seek(p.at + 0.001); setPlaying(true); });
+    els.ticks.appendChild(b);
+    p._tick = b;
   });
 }
 
-function setFrame(key) {
-  // cross-fade to the image for `key` on the back frame
-  const back = state.frontIsB ? els.frameA : els.frameB;
-  const front = state.frontIsB ? els.frameB : els.frameA;
-  back.src = state.images[key].src;
-  // force reflow so the opacity transition runs
-  void back.offsetWidth;
-  back.classList.add("show");
-  front.classList.remove("show");
-  state.frontIsB = !state.frontIsB;
+function phaseFor(g) {
+  let idx = 0;
+  for (let i = 0; i < PHASES.length; i++) if (g >= PHASES[i].at) idx = i;
+  return idx;
 }
 
-function currentFrontEl() { return state.frontIsB ? els.frameB : els.frameA; }
-function currentBackEl() { return state.frontIsB ? els.frameA : els.frameB; }
-
-function enterStage(i, immediate = false) {
-  const s = state.stages[i];
-  state.i = i;
-  state.t = 0;
-
-  // caption swap
+function setPhase(i, immediate = false) {
+  if (i === state.phase) return;
+  state.phase = i;
+  const p = PHASES[i];
   els.readout.classList.add("swap");
-  setTimeout(() => {
-    els.title.textContent = s.title;
-    els.blurb.textContent = s.blurb;
-    els.index.textContent = String(i + 1);
+  const apply = () => {
+    els.title.textContent = p.title;
+    els.blurb.textContent = p.blurb;
     els.readout.classList.remove("swap");
-  }, immediate ? 0 : 180);
-
-  // timeline dot states
-  state.stages.forEach((st, idx) => {
-    st._dot.classList.toggle("done", idx < i);
-    if (idx > i) { st._dot.classList.remove("done"); st._fill.style.width = "0%"; }
-  });
-
-  if (s.key === "rectified" && state.morphOK) {
-    // prepare morph: show plain photo underneath, reset mesh, reveal gl
-    els.viewport.classList.add("morphing");
-    setFrame("input");
-    state.repro.setMorph(0);
-    els.gl.classList.add("show");
-  } else {
-    els.viewport.classList.remove("morphing");
-    els.gl.classList.remove("show");
-    if (!immediate) setFrame(s.key);
-    else { currentFrontEl().src = state.images[s.key].src; }
-  }
+  };
+  if (immediate) apply(); else setTimeout(apply, 160);
+  PHASES.forEach((ph, idx) => ph._tick.classList.toggle("passed", idx <= i));
 }
 
-function updateMorph(p) {
-  // p: progress through the rectified stage [0,1]
-  const meshIn = smooth(0.0, 0.12, p);
-  const morphT = smooth(0.12, 0.82, p);
-  const woodFade = 1 - smooth(0.18, 0.55, p);
-  const reveal = smooth(0.82, 1.0, p);
-
-  els.gl.style.opacity = String(Math.max(meshIn, 1 - reveal));
-  currentFrontEl().style.opacity = String(woodFade); // the input photo (wood) fades
-  state.repro.setMorph(morphT);
-
-  // reveal the true rectified image on the back frame near the end
-  const back = currentBackEl();
-  if (reveal > 0 && back.dataset.key !== "rectified") {
-    back.src = state.images.rectified.src;
-    back.dataset.key = "rectified";
-  }
-  back.style.opacity = String(reveal);
-}
-
-function finishMorph() {
-  // settle: rectified image becomes the front frame, gl hidden
-  const back = currentBackEl();
-  back.classList.add("show");
-  back.style.opacity = "";
-  currentFrontEl().classList.remove("show");
-  currentFrontEl().style.opacity = "";
-  state.frontIsB = !state.frontIsB;
-  els.gl.classList.remove("show");
-  els.gl.style.opacity = "";
-  delete currentBackEl().dataset.key;
-  els.viewport.classList.remove("morphing");
+function render() {
+  state.cine && state.cine.render(state.g);
+  els.fill.style.width = (state.g * 100).toFixed(2) + "%";
+  setPhase(phaseFor(state.g));
 }
 
 function tick(ts) {
-  const dt = Math.min(64, ts - state.lastTs);
-  state.lastTs = ts;
-  const s = state.stages[state.i];
-
+  const dt = Math.min(50, ts - state.last);
+  state.last = ts;
   if (state.playing) {
-    state.t += dt;
-    const p = Math.min(1, state.t / s.dur);
-    s._fill.style.width = (p * 100) + "%";
-
-    if (s.key === "rectified" && state.morphOK) updateMorph(p);
-
-    if (p >= 1) {
-      if (s.key === "rectified" && state.morphOK) finishMorph();
-      s._dot.classList.add("done");
-      const next = (state.i + 1) % state.stages.length;
-      if (next === 0) {
-        // loop: brief pause on the finished result, then restart
-        enterStage(0);
-      } else {
-        enterStage(next);
-      }
+    if (state.g >= 1 && state.holding < HOLD_MS) {
+      state.holding += dt;
+    } else {
+      if (state.g >= 1) { state.g = 0; state.holding = 0; }
+      state.g = Math.min(1, state.g + dt / LOOP_MS);
+      render();
     }
   }
   requestAnimationFrame(tick);
@@ -229,17 +125,7 @@ function setPlaying(v) {
   els.showcase.classList.toggle("paused", !v);
   els.playLabel.textContent = v ? "Pause" : "Play";
 }
-function togglePlay() { setPlaying(!state.playing); }
-
-function jumpTo(i) {
-  // clean up any morph visuals
-  els.viewport.classList.remove("morphing");
-  els.gl.classList.remove("show");
-  els.gl.style.opacity = "";
-  els.frameA.style.opacity = "";
-  els.frameB.style.opacity = "";
-  enterStage(i);
-}
+function seek(g) { state.g = Math.max(0, Math.min(1, g)); state.holding = 0; render(); }
 
 boot().catch((e) => {
   console.error(e);

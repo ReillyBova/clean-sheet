@@ -4,10 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Clean Sheet — phone photos of sheet music, made clean</title>
-  <meta name="description" content="Clean Sheet turns angled, glare-lit phone photos of sheet music into crisp, flat, correctly-sized PDFs. Watch the pipeline lift a page off the table and un-warp it." />
+  <meta name="description" content="Clean Sheet turns angled, glare-lit phone photos of sheet music into crisp, flat, correctly-sized PDFs. Watch a page lift off and un-warp into a clean plate." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
@@ -16,66 +16,68 @@
       <span class="brand-mark" aria-hidden="true"></span>
       <span class="brand-name">Clean&nbsp;Sheet</span>
     </div>
-    <a class="ghlink" href="https://github.com/ReillyBova/clean-sheet" target="_blank" rel="noopener">
-      View on GitHub ↗
-    </a>
+    <a class="ghlink" href="https://github.com/ReillyBova/clean-sheet" target="_blank" rel="noopener">GitHub ↗</a>
   </header>
 
   <section class="hero">
     <h1 class="hero-title">Photos of sheet music,<br /><em>made clean.</em></h1>
     <p class="hero-sub">
       Snap a part on your phone — angled, glare-lit, curling off the table — and Clean Sheet
-      lifts it flat into a crisp, correctly-sized PDF. Watch it work, one stage at a time.
+      lifts it flat into a crisp, correctly-sized PDF.
     </p>
   </section>
 
   <main class="showcase" id="showcase">
     <div class="viewport" id="viewport">
       <canvas id="gl" class="gl" aria-hidden="true"></canvas>
-      <img class="frame" id="frameA" alt="" />
-      <img class="frame" id="frameB" alt="" />
       <div class="scrim"></div>
-      <div class="stage-badge" id="stageBadge"><span id="stageIndex">1</span><span class="stage-total">/ 8</span></div>
     </div>
 
     <div class="readout">
-      <p class="stage-kicker">Pipeline stage</p>
+      <p class="stage-kicker">Watch it work</p>
       <h2 class="stage-title" id="stageTitle">The capture</h2>
-      <p class="stage-blurb" id="stageBlurb">A phone photo on a table — angled, unevenly lit, curling at the edges.</p>
-    </div>
+      <p class="stage-blurb" id="stageBlurb">A phone photo, angled and unevenly lit, curling at the edges.</p>
 
-    <div class="timeline" id="timeline" role="tablist" aria-label="Pipeline stages"></div>
-
-    <div class="controls">
-      <button class="btn" id="playBtn" aria-label="Play or pause">
-        <svg class="ic ic-pause" viewBox="0 0 24 24" width="20" height="20"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
-        <svg class="ic ic-play" viewBox="0 0 24 24" width="20" height="20"><path d="M8 5v14l11-7z"/></svg>
-        <span id="playLabel">Pause</span>
-      </button>
-      <button class="btn btn-ghost" id="replayBtn" aria-label="Replay from start">
-        <svg class="ic" viewBox="0 0 24 24" width="18" height="18"><path d="M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"/></svg>
-        Replay
-      </button>
+      <div class="scrubber">
+        <div class="track" id="track" role="slider" aria-label="Timeline" tabindex="0">
+          <div class="track-fill" id="trackFill"></div>
+          <div class="ticks" id="ticks"></div>
+        </div>
+        <div class="controls">
+          <button class="btn btn-primary" id="playBtn" aria-label="Play or pause">
+            <svg class="ic ic-pause" viewBox="0 0 24 24" width="16" height="16"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+            <svg class="ic ic-play" viewBox="0 0 24 24" width="16" height="16"><path d="M8 5v14l11-7z"/></svg>
+            <span id="playLabel">Pause</span>
+          </button>
+          <button class="btn btn-ghost" id="replayBtn" aria-label="Replay from start">
+            <svg class="ic" viewBox="0 0 24 24" width="15" height="15"><path d="M12 5V2L7 6l5 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"/></svg>
+            Replay
+          </button>
+        </div>
+      </div>
     </div>
   </main>
 
   <section class="closer">
     <div class="closer-grid">
       <div>
-        <h3>Runs offline, on your machine</h3>
-        <p>A single Python CLI, <code>flat_scan.py</code>. Point it at a PDF or a whole folder of parts and it batches them — segmentation, Coons-patch dewarping, soft-gray ink, and optional staff-line straightening.</p>
+        <h3>A tool for musicians</h3>
+        <p>Not a product — just a small, free command-line tool that cleans up your scans. Point it at a PDF or a whole folder of parts and it batches them: segmentation, dewarping, soft-gray ink, and optional staff-line straightening.</p>
       </div>
       <div>
-        <h3>Built for real orchestra parts</h3>
-        <p>Correct physical page sizes, duplex-friendly parity, and a booklet mode that detects the binding fold so a facing page never bleeds in.</p>
+        <h3>Coming soon</h3>
+        <p>A drop-in-your-own-photo version, right here in the browser. For now, the engine lives on GitHub — clone it and run it on your own parts.</p>
       </div>
     </div>
-    <a class="cta" href="https://github.com/ReillyBova/clean-sheet" target="_blank" rel="noopener">Get Clean Sheet on GitHub ↗</a>
+    <div class="cta-row">
+      <span class="cta soon" aria-disabled="true">Try it in your browser — coming soon</span>
+      <a class="cta cta-link" href="https://github.com/ReillyBova/clean-sheet" target="_blank" rel="noopener">See the code ↗</a>
+    </div>
   </section>
 
   <footer class="site-footer">
     <span>Clean Sheet — the <code>flat_scan</code> engine.</span>
-    <span>Demo page: Glinka, <em>Ruslan and Ludmila</em> overture (Violin I).</span>
+    <span>Demo: Glinka, <em>Ruslan and Ludmila</em> overture.</span>
   </footer>
 
   <script type="module" src="js/app.js"></script>
