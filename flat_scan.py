@@ -818,27 +818,36 @@ def remove_small_components(mask: np.ndarray, min_area: int = 10) -> np.ndarray:
     return out
 
 
-def despeckle_isolated(mask: np.ndarray, big_area: int = 150, protect_radius: int = 15) -> np.ndarray:
-    """Drop small ink blobs that sit alone in the paper, away from real content.
+def despeckle_isolated(mask: np.ndarray, big_area: int = 150, protect_radius: int = 15,
+                       border_frac: float = 0.045) -> np.ndarray:
+    """Drop isolated speckle in the page's outer border, away from real content.
 
     Illumination normalization is unreliable in the perimeter band of the page
     (edge shadow / vignetting), so the ink threshold sprinkles small isolated
-    specks there. They used to render as faint gray and went unnoticed; with the
-    glare-robust solid-black ink tone they read as visible grain. Real small
-    marks (staccato dots, the dot of a dotted note, accents) always sit next to
-    substantial ink — a notehead, stem, or staff line — whereas the perimeter
-    noise is isolated. So we keep every large component (real notes/text/lines)
-    plus any small component within `protect_radius` of one, and discard the rest.
+    specks there. We remove only speckle that lies entirely within the outer
+    ``border_frac`` frame and is not adjacent to substantial ink -- the region
+    where genuine musical content never lives. Interior marks (staccato dots,
+    dashed/dotted lines, tempo text) are always kept, even when small and
+    isolated, so this cleans the edge frame without ever eating real content.
     """
     m = (mask > 0).astype(np.uint8)
+    h, w = m.shape
     n, labels, stats, _ = cv2.connectedComponentsWithStats(m, 8)
     if n <= 1:
         return mask
     areas = stats[:, cv2.CC_STAT_AREA]
     ws = stats[:, cv2.CC_STAT_WIDTH]
     hs = stats[:, cv2.CC_STAT_HEIGHT]
+    xs = stats[:, cv2.CC_STAT_LEFT]
+    ys = stats[:, cv2.CC_STAT_TOP]
     is_large = (areas >= big_area) | (ws >= 25) | (hs >= 25)
     is_large[0] = False  # background
+
+    bx = border_frac * w
+    by = border_frac * h
+    # A component is in the border frame only if its whole bbox sits in the outer
+    # band on some side (never straddling into the interior content region).
+    in_border = ((xs + ws) <= bx) | (xs >= (w - bx)) | ((ys + hs) <= by) | (ys >= (h - by))
 
     large = is_large[labels]
     k = 2 * protect_radius + 1
@@ -847,7 +856,10 @@ def despeckle_isolated(mask: np.ndarray, big_area: int = 150, protect_radius: in
     touch = np.zeros(n, dtype=bool)
     touch[np.unique(labels[prot > 0])] = True
 
-    keep = is_large | touch
+    # Discard only: small, isolated, AND in the border frame. Everything else stays.
+    drop = (~is_large) & (~touch) & in_border
+    drop[0] = False
+    keep = ~drop
     keep[0] = False
     return np.where(keep[labels], np.uint8(255), np.uint8(0))
 
@@ -877,8 +889,8 @@ def clean_ink(rect_bgr: np.ndarray, mode: str = "soft-gray", threshold_bias: int
     # while preserving long/thin musical lines.
     mask = remove_small_components(mask, min_area=10)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((2, 2), np.uint8), iterations=1)
-    # Drop isolated perimeter speckle so the glare-robust solid-black ink tone
-    # doesn't render edge-illumination noise as visible grain on clean paper.
+    # Clean isolated illumination speckle from the outer page frame only, so the
+    # margins stay clean without ever removing interior content.
     mask = despeckle_isolated(mask, big_area=150, protect_radius=15)
 
     support = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1).astype(bool)
@@ -886,26 +898,19 @@ def clean_ink(rect_bgr: np.ndarray, mode: str = "soft-gray", threshold_bias: int
     # solid instead of only their darkest cores (improves ink retention). The
     # support mask still confines ink to detected strokes, keeping paper clean.
     darkness = 1.0 - smoothstep(thr - 22, thr + 10, norm.astype(np.float32))
-    # Force stroke *interiors* fully opaque. `darkness` is derived from the
-    # normalized brightness, which specular flash glare lightens in the page
-    # centre; eroding the (glare-robust) ink mask marks the solid body of every
-    # stroke, so we can pin those pixels to full coverage. This keeps notehead
-    # and blob interiors uniformly dark instead of washing out under glare, while
-    # the sub-threshold stroke *boundary* still ramps for soft anti-aliasing.
-    core = cv2.erode(mask, np.ones((3, 3), np.uint8), iterations=1).astype(bool)
-    darkness = np.where(core, 1.0, darkness)
     alpha = np.where(support, np.clip(darkness, 0, 1), 0)
     alpha = cv2.GaussianBlur(alpha.astype(np.float32), (0, 0), sigmaX=0.45)
     alpha = np.clip(alpha ** 0.8, 0, 1)
 
     paper = np.full_like(gray, 255.0)
     soft_black = np.clip(paper * (1 - alpha) + 8.0 * alpha, 0, 255).astype(np.uint8)
-    # Ink tone is driven by *coverage* (the glare-robust `darkness`), not by the
-    # raw normalized brightness. Solid stroke bodies (darkness -> 1) render near
-    # black and uniform across the page; only genuinely faint/partial ink lifts
-    # toward gray. This preserves soft-gray's fine-edge character while removing
-    # the centre-page flash wash that a `norm * 0.5` fill produced.
-    ink_tone = np.clip((1.0 - np.clip(darkness, 0, 1)) * 90.0, 0, 160)
+    # Soft-gray ink tone: the original fill was `norm * 0.5`, which specular flash
+    # glare lifted in the page centre so ink there washed toward light gray while
+    # the edges stayed dark. Clamp that tone to a tight soft-gray band: the floor
+    # keeps ink from going crude/black and the ceiling caps the glare wash, so ink
+    # darkness is normalized across the page while the original fine, soft-gray
+    # character (and the anti-aliased edges from `alpha`) is preserved.
+    ink_tone = np.clip(norm.astype(np.float32) * 0.5, 24, 40)
     soft_gray = np.clip(paper * (1 - alpha) + ink_tone * alpha, 0, 255).astype(np.uint8)
     binary = np.full_like(norm, 255)
     binary[mask > 0] = 0
