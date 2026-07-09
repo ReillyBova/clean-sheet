@@ -12,3 +12,6 @@ venv/
 *_work/
 *_debug/
 *_page_pngs/
+
+# Regression goldens (generated locally via tools/regression_check.py capture)
+tools/regression/golden/
