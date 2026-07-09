@@ -1,22 +1,57 @@
-# FlatScan
+# Clean Sheet
 
-Phone-scan cleanup workflow for orchestra parts.
+**Turn phone photos of sheet music into clean, flat, correctly-sized PDFs.**
 
-Pipeline:
+Clean Sheet takes a casual phone/tablet capture of a printed part — shot at an
+angle, unevenly lit, curling off the table, maybe folded into a book — and
+returns a crisp, deskewed, page-sized PDF that reads like a proper scan. The
+engine is a single CLI, `flat_scan.py`.
 
-1. PDF/image input
-2. Paper segmentation
-3. Boundary-curve UV / Coons-patch reprojection
-4. Lighting normalization
-5. Soft grayscale ink cleanup
-6. Correct-size PDF output
+| Raw capture | Clean Sheet output |
+| --- | --- |
+| angled, glare, curl, wavy staves, neighbour-page bleed | flat, evenly lit, soft-gray ink, straight staves, correct page size |
 
-Optional: staff-line straightening (`--straighten`) to flatten residual waviness/skew in sheet music.
+See `samples/russlan_raw_phone_scan.pdf` → `samples/russlan_clean_evenstart_8.9375x12_400dpi.pdf`.
+
+## What it does
+
+- **Segments** the sheet from the background under uneven lighting (illumination-
+  normalized, robust to wood grain, shadows, and adjacent surfaces).
+- **Rectifies** page geometry with a Coons boundary patch — the four page edges
+  drive a UV map that un-warps perspective and paper curl into a true rectangle.
+- **Cleans the ink** to a fine, anti-aliased **soft grayscale**, removing uneven
+  lighting and gently normalizing ink darkness (including flash glare) without
+  going crude or losing thin lines.
+- **Booklet / crease mode** (`--booklet`): for half-spread captures of bound
+  books, detects the binding fold and clips the page there so the neighbouring
+  page never bleeds in.
+- **Staff-line straightening** (`--straighten`): uses the staff lines themselves
+  to flatten residual waviness and skew, square the binding-side margin, and
+  center the music — while keeping bar lines vertical and staff spacing intact.
+- Outputs a **correctly-sized PDF** at your chosen physical dimensions and DPI,
+  with optional blank-page padding for clean double-sided printing.
+
+## Pipeline
+
+Each page flows through (intermediate artifacts are written with `--debug`):
+
+1. **Render** — rasterize the page at the scan's native resolution.
+2. **Segment** — illumination-normalized threshold → sever bridges → largest
+   component → fill holes → repair boundary notches. *(Booklet mode: detect the
+   crease and clip the mask at the fold.)*
+3. **Rectify** — corners → boundary edges → smooth + slight inset → Coons remap
+   to a flat rectilinear plate.
+4. **Clean ink** — denoise → remove uneven lighting → threshold → perimeter
+   despeckle → soft-gray alpha compositing.
+5. **Straighten** *(opt-in)* — staff-guided vertical flattening → bar-line
+   de-shear → per-system left-margin de-drift → crease-side right-margin squaring
+   → page centering.
+6. **Assemble** — size to the physical page, pad for parity, write the PDF.
 
 ## Setup
 
 ```bash
-cd "/Users/rebova/Documents/Coding Projects/FlatScan"
+cd ~/Git-Repositories/clean-sheet
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -26,51 +61,45 @@ pip install -r requirements.txt
 
 ```bash
 python flat_scan.py input.pdf output.pdf \
-  --width-in 8.9375 \
-  --height-in 12 \
-  --dpi 400
+  --width-in 8.9375 --height-in 12 --dpi 400
 ```
 
-Input resolution is detected automatically: each page is rasterized at its embedded scan's native resolution, so exports that declare a small page box around a full-resolution photo are handled correctly without any manual scaling.
+Input resolution is detected automatically: each page is rasterized at its
+embedded scan's native resolution, so exports that declare a small page box
+around a full-resolution photo are handled correctly with no manual scaling.
 
 ## Batch mode
 
-Pass a directory as the input to process every PDF/image inside it. If the output is omitted, results go to `<input>-Processed`.
+Pass a directory to process every PDF/image inside it. If the output is omitted,
+results go to `<input>-Processed`.
 
 ```bash
 python flat_scan.py "path/to/parts folder" \
-  --width-in 8.9375 \
-  --height-in 12 \
-  --dpi 400
+  --width-in 8.9375 --height-in 12 --dpi 400
 ```
 
-Use `--starts-on-even-files` to mark which files begin on an even printed page (comma-separated filename/stem/glob patterns), or `--starts-on-even-all` for every file:
+Add `--recursive` to scan subdirectories and preserve their structure.
+
+## Booklet / crease mode (opt-in)
+
+For half-spread photos of a bound book — where one left/right edge folds into the
+spine and a sliver of the facing page bleeds in — `--booklet` detects the fold
+crease and clips the page there. The binding side is chosen automatically (the
+side where the paper runs off the frame), and full flat sheets in view (e.g.
+title pages) are left whole.
 
 ```bash
-python flat_scan.py "path/to/parts folder" \
-  --width-in 8.9375 \
-  --height-in 12 \
-  --dpi 400 \
-  --starts-on-even-files "Violin I.pdf,*cello*"
-```
-
-You can also list one pattern per line in a `starts_on_even.txt` file inside the input directory (picked up automatically), or point at any file with `--starts-on-even-list`. Add `--recursive` to scan subdirectories and preserve their structure in the output.
-
-## Parallel processing
-
-Pages are processed in parallel across separate processes. Each worker renders a full-resolution scan and is CPU- and memory-heavy, so the default is conservative (half your logical cores, capped at 4). Tune it with `--jobs`/`-j`:
-
-```bash
-python flat_scan.py "path/to/parts folder" \
+python flat_scan.py "path/to/booklet scans" \
   --width-in 8.9375 --height-in 12 --dpi 400 \
-  --jobs 6
+  --booklet --straighten
 ```
-
-Use `--jobs 1` to disable parallelism (e.g. on a low-memory machine or for clean, ordered debug logs). In batch mode the worker count is applied per file, so total concurrency stays capped at `--jobs`.
 
 ## Straightening wavy staff lines (opt-in)
 
-The Coons rectification corrects gross page geometry from the page boundary, but has no information about the page interior, so gentle "waviness" (staff lines dipping/rising) and a slight skew can remain. For sheet music, `--straighten` uses the staff lines themselves — which should be straight, horizontal, and parallel — to flatten this residual distortion.
+The Coons rectification corrects gross page geometry from the boundary, but has
+no information about the page interior, so gentle waviness and skew can remain.
+For sheet music, `--straighten` uses the staff lines — which should be straight,
+horizontal, and parallel — to flatten this.
 
 ```bash
 python flat_scan.py "path/to/parts folder" \
@@ -78,65 +107,76 @@ python flat_scan.py "path/to/parts folder" \
   --straighten
 ```
 
-How it works (implemented in `flatscan_dewarp.py`, applied after ink cleanup):
+How it works (in `flatscan_dewarp.py`, applied after ink cleanup):
 
-1. Estimate staff line thickness and spacing from vertical run-length histograms.
+1. Estimate staff-line thickness and spacing from vertical run-length histograms.
 2. Detect staff *systems* (the 5-line combs) via horizontal-ink projection.
-3. Measure each system's vertical wave across the page by incremental comb correlation.
-4. Flatten each system, build a smooth monotonic vertical displacement field (which cannot fold/smear), and remap.
+3. **Flatten** each system: trace its staff lines and iron the whole comb flat
+   with a per-column rigid shift (staff spacing preserved — lines can never be
+   thickened or merged). A robust rigid fallback runs when the trace is unclear,
+   and whichever leaves the staves flatter is kept — so a page is never made
+   worse.
+4. **De-shear** so bar lines/stems read vertical; **de-drift** each system's left
+   margin; **square** the crease-side right margin; **center** the music block —
+   all margin-seam-aware so a binding shadow is never mistaken for content.
 
-It is **opt-in and self-contained**: without the flag the pipeline is byte-for-byte unchanged. It also **safely no-ops** on pages without clear staves (title pages, near-blank pages) and refuses implausibly large warps, so it never degrades a page below the standard rectified output. Use `--debug` to compare `17_pre_straighten.png` vs `18_straightened.png`.
+It is **opt-in and self-contained** — without the flag the pipeline is unchanged
+— and **safely no-ops** on pages without clear staves. Compare `17_pre_straighten`
+vs `18_straightened` vs `19_aligned` with `--debug`.
 
+## Double-sided printing & parity
 
-This inserts a blank page at the start so double-sided printing preserves page turns.
+By default an odd final page count is padded with a trailing blank so parts stay
+duplex-friendly (`--no-pad-even` to disable). For a part whose first scanned page
+is an even (left-hand) page, insert a leading blank:
 
 ```bash
 python flat_scan.py input.pdf output.pdf \
-  --width-in 8.9375 \
-  --height-in 12 \
-  --dpi 400 \
+  --width-in 8.9375 --height-in 12 --dpi 400 \
   --starts-on-even
 ```
 
-## Resume after failure or timeout
+In batch mode, mark which files need a leading blank with
+`--starts-on-even-files "Violin I.pdf,*cello*"`, `--starts-on-even-all`, or a
+`starts_on_even.txt` file (one pattern per line) in the input directory.
 
-The script writes page-by-page working files to `<output_stem>_work`. Use `--resume` to skip already completed pages.
+## Parallel processing
 
-```bash
-python flat_scan.py input.pdf output.pdf \
-  --width-in 8.9375 \
-  --height-in 12 \
-  --dpi 400 \
-  --starts-on-even \
-  --resume
-```
+Pages are processed across separate worker processes. Each worker renders a
+full-resolution scan and is CPU- and memory-heavy, so the default is conservative
+(half your logical cores, capped at 4). Tune with `--jobs`/`-j`; use `--jobs 1` to
+disable parallelism. In batch mode the worker count applies per file.
+
+## Resume & working files
+
+Page-by-page working files are written to `<output_stem>_work`. Use `--resume` to
+skip already-completed pages after an interruption, and `--clean-work` to delete
+the working directory after a successful assembly.
 
 ## Debugging
 
 ```bash
 python flat_scan.py input.pdf output.pdf \
-  --width-in 8.9375 \
-  --height-in 12 \
-  --dpi 400 \
-  --debug \
-  --debug-pages 1
+  --width-in 8.9375 --height-in 12 --dpi 400 \
+  --debug --debug-pages 1
 ```
 
-Debug outputs show intermediate steps such as segmentation, UV grid, reprojection, and cleanup.
+Writes intermediate stages (segmentation seed, page mask, boundary UV grid,
+rectified plate, ink mask, straightening steps) into the debug directory.
 
-## Alternate output modes
+## Output modes
 
-Default is `soft-gray`, the recommended anti-aliased grayscale-ink output.
+Default is `soft-gray`, the recommended anti-aliased grayscale ink.
 
-```bash
---mode soft-gray
---mode soft-black
---mode binary
---mode normalized-gray
---mode color
-```
+| Mode | Description |
+| --- | --- |
+| `soft-gray` | Fine anti-aliased grayscale ink (default, recommended) |
+| `soft-black` | Anti-aliased near-black ink |
+| `binary` | Hard black/white |
+| `normalized-gray` | Lighting-normalized grayscale, paper retained |
 
 ## Included samples
 
-- `samples/russlan_raw_phone_scan.pdf` — the original 4-page sample scan
-- `samples/russlan_clean_evenstart_8.9375x12_400dpi.pdf` — cleaned output with a leading blank page
+- `samples/russlan_raw_phone_scan.pdf` — the original phone-scan sample.
+- `samples/russlan_clean_evenstart_8.9375x12_400dpi.pdf` — cleaned output with a
+  leading blank page.
