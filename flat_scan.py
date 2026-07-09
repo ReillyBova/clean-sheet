@@ -527,13 +527,14 @@ def _neighbour_bleed_crease(stats: np.ndarray, cents: np.ndarray, n: int,
     Called when the page carries no music of its own on the binding side (so the
     normal music-edge crease has nothing to hug). A blank verso often still shows
     a sliver of the facing page across the fold: its clefs, measure numbers and
-    system brackets sit as narrow, off-centre ink components pinned against the
-    binding frame edge. We take the page-ward (inner) edge of that strip and clip
-    just outside the fold gutter, so the blank page comes out clean rather than
-    carrying the neighbour's content. Returns ``None`` when there is no such strip
-    (a genuinely blank page is left untouched).
+    system brackets sit as substantial ink components pushed well off-centre
+    toward the binding. Because this page has no content of its own to preserve,
+    any such off-centre cluster is neighbour bleed; we take its page-ward (inner)
+    edge and clip just outside the fold gutter, so the page comes out clean. The
+    strip need not touch the frame edge -- the facing page often keeps its own
+    outer margin, leaving blank paper between its content and the frame. Returns
+    ``None`` when there is no such cluster (a genuinely blank page is untouched).
     """
-    edge_band = int(0.03 * w)
     inner: list[float] = []
     for i in range(1, n):
         area = int(stats[i, cv2.CC_STAT_AREA])
@@ -543,10 +544,10 @@ def _neighbour_bleed_crease(stats: np.ndarray, cents: np.ndarray, n: int,
         ww = int(stats[i, cv2.CC_STAT_WIDTH])
         cx = float(cents[i][0])
         if side == "right":
-            if (x + ww) >= (w - 1 - edge_band) and cx > 0.60 * w:
+            if cx > 0.60 * w:
                 inner.append(float(x))            # leftmost = page-ward edge
         else:
-            if x <= edge_band and cx < 0.40 * w:
+            if cx < 0.40 * w:
                 inner.append(float(x + ww))       # rightmost = page-ward edge
     if len(inner) < 3:
         return None
