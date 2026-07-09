@@ -576,9 +576,32 @@ def _binding_edge_crease(gray: np.ndarray, page: np.ndarray, side: str) -> dict 
     if int(good.sum()) >= 6:
         by, bx = by[good], bx[good]
     deg = 2 if len(by) >= 8 else 1
-    curve = np.polyval(np.polyfit(by, bx, deg), yy)
+    base = np.polyval(np.polyfit(by, bx, deg), yy)
     margin = int(0.006 * w)
-    curve = curve + margin if side == "right" else curve - margin
+    sgn = 1.0 if side == "right" else -1.0
+    curve = base + sgn * margin
+
+    # Never clip this page's own music. The low-order fit tracks the gentle fold
+    # bend but can *undershoot* an outlier system whose binding-side end juts past
+    # the smooth trend -- e.g. a lone closing barline on the bottom system -- which
+    # would amputate real content. ``e`` is the per-row outer edge of THIS page's
+    # kept components only (a bled neighbour lives across the blank gutter as a
+    # separate component that was dropped above), so clamping the crease to sit
+    # just outside it preserves every note/barline while never reaching into the
+    # neighbour. Gaps between systems are interpolated and the edge is widened a
+    # touch vertically (running max/min) so the protection is smooth, not a notch.
+    idx = np.where(have)[0]
+    if idx.size:
+        env = np.interp(yy, idx, e[idx]).astype(np.float32).reshape(-1, 1)
+        ksz = max(3, int(0.01 * h) | 1)
+        kern = cv2.getStructuringElement(cv2.MORPH_RECT, (1, ksz))
+        if side == "right":
+            env = cv2.dilate(env, kern)[:, 0]
+            curve = np.maximum(curve, env + margin)
+        else:
+            env = cv2.erode(env, kern)[:, 0]
+            curve = np.minimum(curve, env - margin)
+
     curve = np.clip(curve, 0.0, w - 1.0)
     score = float(w - np.median(curve)) if side == "right" else float(np.median(curve))
     return {"side": side, "curve": curve, "score": score}
