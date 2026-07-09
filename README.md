@@ -7,6 +7,11 @@ angle, unevenly lit, curling off the table, maybe folded into a book — and
 returns a crisp, deskewed, page-sized PDF that reads like a proper scan. The
 engine is a single CLI, `flat_scan.py`.
 
+> **▶ [See it in action → reillybova.github.io/clean-sheet](https://reillybova.github.io/clean-sheet/)** — an
+> interactive walkthrough that animates the real pipeline on a sample page:
+> finding the sheet, mapping the warped surface with a UV grid, lifting it flat,
+> and developing the clean soft-gray ink.
+
 | Raw capture | Clean Sheet output |
 | --- | --- |
 | angled, glare, curl, wavy staves, neighbour-page bleed | flat, evenly lit, soft-gray ink, straight staves, correct page size |
@@ -180,3 +185,25 @@ Default is `soft-gray`, the recommended anti-aliased grayscale ink.
 - `samples/russlan_raw_phone_scan.pdf` — the original phone-scan sample.
 - `samples/russlan_clean_evenstart_8.9375x12_400dpi.pdf` — cleaned output with a
   leading blank page.
+
+## Live demo (webapp)
+
+The interactive walkthrough at
+**[reillybova.github.io/clean-sheet](https://reillybova.github.io/clean-sheet/)**
+is a static site served from `docs/` via GitHub Pages. It's a single continuous
+WebGL shot (three.js) that plays the real pipeline stages on one page — the mesh,
+UV grid, and un-warp are driven by actual Coons source coordinates exported from
+a live run.
+
+- `docs/` — the site (`index.html`, `css/`, `js/cinematic.js` scene + `js/app.js`
+  controller, `assets/`).
+- `tools/build_demo_assets.py` — regenerates the demo images and
+  `docs/assets/demo.json` (the per-vertex source→flat UV grid) from a real
+  pipeline run:
+
+  ```bash
+  python tools/build_demo_assets.py
+  ```
+
+No build step is required — three.js loads from a CDN, and a `.nojekyll` file lets
+Pages serve the assets as-is.
