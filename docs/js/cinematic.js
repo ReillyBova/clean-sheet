@@ -230,7 +230,9 @@ export class Cinematic {
     this.gridMat.opacity = Math.max(0, gridOp);
     this.bgMat.opacity = bgFade;
     if (this.inkMat) this.inkMat.opacity = inkOp;
-    this.pageMat.opacity = 1;
+    // page mesh only appears as it lifts off the background — before that the
+    // background photo carries the image, so there is no doubled "sheet on top".
+    this.pageMat.opacity = sstep(0.42, 0.47, g);
 
     // draw-on
     this.outGeo.setDrawRange(0, Math.max(2, Math.floor(this.perim.length * outDraw)));
