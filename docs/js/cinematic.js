@@ -241,7 +241,6 @@ export class Cinematic {
     const gridOp   = sstep(0.26, 0.32, g) * linesOut;
     const bgFade   = 1 - sstep(0.42, 0.66, g) * 0.95;   // background darkens as page lifts
     const inkOp    = sstep(0.72, 0.90, g);
-    const push     = 1 + sstep(0.0, 0.42, g) * 0.03;    // gentle ken-burns on the capture
 
     this._writePositions(morphT, 0);
 
@@ -258,13 +257,10 @@ export class Cinematic {
     this.outGeo.setDrawRange(0, Math.max(2, Math.floor(this.perim.length * outDraw)));
     this.gridGeo.setDrawRange(0, Math.max(0, Math.floor((this.gridPairs.length / 2) * gridDraw) * 2));
 
-    // the flat page rests exactly on its plate — no scale overshoot
+    // the flat page rests exactly on its plate; background stays fixed so the
+    // grid/outline overlay is always aligned pixel-for-pixel with the photo.
     this.rig.position.set(0, 0, 0);
     this.rig.scale.set(1, 1, 1);
-    // early ken-burns on the background capture only
-    const cx = 0.5, cy = this.aspect / 2;
-    this.bg.scale.set(push, push, 1);
-    this.bg.position.set(cx - cx * push, cy - cy * push, -0.2);
 
     this.renderer.render(this.scene, this.camera);
   }
