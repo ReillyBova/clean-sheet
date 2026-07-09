@@ -520,6 +520,48 @@ def detect_crease(
     return best
 
 
+def _neighbour_bleed_crease(stats: np.ndarray, cents: np.ndarray, n: int,
+                            h: int, w: int, side: str) -> dict | None:
+    """Clip a facing-page bleed strip off a blank/near-blank page.
+
+    Called when the page carries no music of its own on the binding side (so the
+    normal music-edge crease has nothing to hug). A blank verso often still shows
+    a sliver of the facing page across the fold: its clefs, measure numbers and
+    system brackets sit as narrow, off-centre ink components pinned against the
+    binding frame edge. We take the page-ward (inner) edge of that strip and clip
+    just outside the fold gutter, so the blank page comes out clean rather than
+    carrying the neighbour's content. Returns ``None`` when there is no such strip
+    (a genuinely blank page is left untouched).
+    """
+    edge_band = int(0.03 * w)
+    inner: list[float] = []
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < 150:
+            continue
+        x = int(stats[i, cv2.CC_STAT_LEFT])
+        ww = int(stats[i, cv2.CC_STAT_WIDTH])
+        cx = float(cents[i][0])
+        if side == "right":
+            if (x + ww) >= (w - 1 - edge_band) and cx > 0.60 * w:
+                inner.append(float(x))            # leftmost = page-ward edge
+        else:
+            if x <= edge_band and cx < 0.40 * w:
+                inner.append(float(x + ww))       # rightmost = page-ward edge
+    if len(inner) < 3:
+        return None
+    arr = np.asarray(inner, dtype=float)
+    gutter = int(0.012 * w)
+    if side == "right":
+        cut = float(np.percentile(arr, 8)) - gutter
+    else:
+        cut = float(np.percentile(arr, 92)) + gutter
+    cut = float(np.clip(cut, 0.0, w - 1.0))
+    curve = np.full(h, cut, dtype=float)
+    score = float(w - cut) if side == "right" else float(cut)
+    return {"side": side, "curve": curve, "score": score}
+
+
 def _binding_edge_crease(gray: np.ndarray, page: np.ndarray, side: str) -> dict | None:
     """Smooth crease hugging the outer edge of this page's music on ``side``."""
     h, w = gray.shape
@@ -536,12 +578,31 @@ def _binding_edge_crease(gray: np.ndarray, page: np.ndarray, side: str) -> dict 
     n, lab, stats, cents = cv2.connectedComponentsWithStats(ink, 8)
     cen = w // 2
     keep = np.zeros((h, w), dtype=bool)
+    own = np.zeros((h, w), dtype=bool)
+    edge_band = int(0.03 * w)
     for i in range(1, n):
-        wide = stats[i, cv2.CC_STAT_WIDTH] >= 0.15 * w
-        big = stats[i, cv2.CC_STAT_AREA] >= 0.002 * h * w
-        centred = abs(cents[i][0] - cen) < 0.30 * w
+        wc = float(cents[i][0])
+        x = int(stats[i, cv2.CC_STAT_LEFT])
+        ww = int(stats[i, cv2.CC_STAT_WIDTH])
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        wide = ww >= 0.15 * w
+        big = area >= 0.002 * h * w
+        centred = abs(wc - cen) < 0.30 * w
         if wide and big and centred:
             keep |= lab == i
+        # "Own content" (for the protective envelope) is any substantial component
+        # that is NOT a facing-page bleed. Bleed hugs the binding frame edge AND
+        # sits off-centre toward the binding; this page's own binding-side extras
+        # -- the boxed part name, system brackets, a leading clef -- stick out past
+        # the staves toward the fold but never reach the frame edge, so they are
+        # kept and protected from clipping.
+        if area >= 0.0004 * h * w:
+            if side == "right":
+                bleed = (x + ww) >= (w - 1 - edge_band) and wc > 0.60 * w
+            else:
+                bleed = x <= edge_band and wc < 0.40 * w
+            if not bleed:
+                own |= lab == i
     e = np.full(h, np.nan)
     for y in range(h):
         col = np.where(keep[y])[0]
@@ -549,7 +610,12 @@ def _binding_edge_crease(gray: np.ndarray, page: np.ndarray, side: str) -> dict 
             e[y] = float(col[-1] if side == "right" else col[0])
     have = ~np.isnan(e)
     if int(have.sum()) < 20:
-        return None
+        # No music of this page's own on the binding side: a blank/near-blank page
+        # such as a blank verso. If the facing page has bled a strip of its content
+        # across the fold, it hugs the binding frame edge as narrow, off-centre
+        # components; clip that strip at the fold gutter so the blank page comes out
+        # clean instead of carrying the neighbour's clefs/measure numbers.
+        return _neighbour_bleed_crease(stats, cents, n, h, w, side)
 
     # Robust smooth boundary: per-band outer percentile of the music edge, drop
     # outlier bands (stray marks), then a low-order fit that tracks the gentle
@@ -590,9 +656,23 @@ def _binding_edge_crease(gray: np.ndarray, page: np.ndarray, side: str) -> dict 
     # just outside it preserves every note/barline while never reaching into the
     # neighbour. Gaps between systems are interpolated and the edge is widened a
     # touch vertically (running max/min) so the protection is smooth, not a notch.
-    idx = np.where(have)[0]
-    if idx.size:
-        env = np.interp(yy, idx, e[idx]).astype(np.float32).reshape(-1, 1)
+    # Never clip this page's own content. The low-order fit tracks the gentle fold
+    # bend, but individual elements can jut past that smooth trend toward the
+    # binding -- a lone closing barline on the bottom system, or the boxed part
+    # name / system bracket / leading clef on a first page, which sit further into
+    # the gutter than the staves. We clamp the crease so it never crosses the
+    # binding-side edge of THIS page's own ink (the ``own`` mask, which excludes
+    # facing-page bleed), guaranteeing every mark is preserved while the neighbour
+    # is still removed. Gaps between rows are interpolated and the edge widened a
+    # touch vertically so the protection is smooth, not a notch.
+    oe = np.full(h, np.nan)
+    for y in range(h):
+        col = np.where(own[y])[0]
+        if col.size:
+            oe[y] = float(col[-1] if side == "right" else col[0])
+    oidx = np.where(~np.isnan(oe))[0]
+    if oidx.size:
+        env = np.interp(yy, oidx, oe[oidx]).astype(np.float32).reshape(-1, 1)
         ksz = max(3, int(0.01 * h) | 1)
         kern = cv2.getStructuringElement(cv2.MORPH_RECT, (1, ksz))
         if side == "right":
