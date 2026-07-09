@@ -448,31 +448,38 @@ def detect_crease(
     min_score: float = 6.0,
     touch_frac: float = 0.02,
 ) -> dict | None:
-    """Locate the book-fold crease on the binding side of a half-spread scan.
+    """Locate the binding-side clip line on a booklet half-spread scan.
 
     In "booklet" captures each photo shows one page plus the fold into the spine,
     and a sliver of the facing page frequently bleeds in past the fold. That bleed
     corrupts the page boundary (the Coons patch reaches into the neighbour and the
-    binding-side edge buckles). Detecting the crease lets us redraw that one page
-    edge along the fold so the neighbour is excluded and the edge comes out clean.
+    binding-side edge buckles). Clipping the mask along this page's own outer edge
+    excludes the neighbour and hands the patch a clean binding edge.
 
     Which side is the binding is decided by geometry, not guesswork: a booklet
     half-spread always runs off into the spine on one L/R side, so the paper mask
     reaches the image border there with no table margin. A full flat sheet (e.g. a
-    title page) is instead "floating" — table background surrounds it on all four
-    sides — even when it carries an internal fold shadow. A floating page is never
-    clipped, which protects full sheets whose content straddles the fold.
+    title page) is instead "floating" -- table background surrounds it on all four
+    sides -- and is never clipped, which protects full sheets whose content
+    straddles the fold.
 
-    Given the binding side, the crease itself reads as a faint, near-vertical
-    *valley*: a dark fold-shadow line flanked by bright paper on both sides. We
-    suppress the ink (grayscale close), blur, then apply a matched valley filter
-    ``roll(+d) + roll(-d) - 2*sm`` whose response peaks on exactly that profile.
-    A paper->table step edge is bright-on-one-side only, so it is ignored.
+    Given the binding side, we clip along the outer edge of *this page's music*
+    rather than hunting for the fold shadow. This is far more robust: on a page
+    that simply runs off the frame (no facing page in view) the old fold-valley
+    filter would latch onto this page's own content -- the stacked closing
+    barlines, or the shadow where dense notes end -- and amputate the binding-side
+    ends of systems. Instead we isolate this page's music with a black-tophat
+    (which suppresses the broad fold/spine shadow that would bridge the two pages)
+    and keep the wide, page-centred ink components; a bled neighbour lives across
+    the blank gutter as its own component and is dropped. The crease is a smooth
+    low-order curve fit just *outside* that music edge, so this page's notes,
+    barlines and clefs are always preserved while the fold shadow and any facing
+    page are removed.
 
-    Returns ``None`` for a floating sheet or when no confident crease valley is
-    found on the binding side. Otherwise returns ``{side, curve, score}`` where
-    ``side`` is ``"left"``/``"right"`` and ``curve`` is a per-row array of crease
-    x-positions (the fold bends, so it is not a straight line).
+    Returns ``None`` for a floating sheet or when no binding-side music is found.
+    Otherwise returns ``{side, curve, score}`` where ``side`` is
+    ``"left"``/``"right"``, ``curve`` is a per-row array of crease x-positions and
+    ``score`` is the width of the strip being clipped (fold + any neighbour).
     """
     h, w = img_bgr.shape[:2]
     m = mask > 0
@@ -481,8 +488,7 @@ def detect_crease(
 
     ys, xs = np.where(m)
     x0, x1 = int(xs.min()), int(xs.max())
-    pw = x1 - x0
-    if pw <= 0:
+    if x1 - x0 <= 0:
         return None
 
     # Binding side = the L/R side where the paper runs off the frame (no table
@@ -494,51 +500,87 @@ def detect_crease(
         return None
 
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    # Suppress ink so the broad fold shadow is the dominant dark feature, then
-    # blur to a smooth low-frequency field the valley filter can measure.
-    close_k = max(9, (min(h, w) // 120) | 1)
-    ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k, close_k))
-    noink = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, ker)
-    sm = cv2.GaussianBlur(noink.astype(np.float32), (0, 0), sigmaX=25, sigmaY=25)
-
-    d = max(25, (w // 60) | 1)
-    valley = np.roll(sm, d, axis=1) + np.roll(sm, -d, axis=1) - 2.0 * sm
-    valley[:, :d] = 0.0
-    valley[:, -d:] = 0.0
-    valley[~m] = 0.0
-
-    rows = m.any(axis=1)
-    yy = np.arange(h)
-
-    def scan(lo: float, hi: float) -> tuple[np.ndarray, np.ndarray, float]:
-        a = int(x0 + lo * pw)
-        b = max(int(x0 + hi * pw), a + 1)
-        seg = valley[:, a:b]
-        idx = np.argmax(seg, axis=1) + a
-        val = seg[yy, idx - a]
-        return idx, val, float(np.median(val[rows]))
-
-    # Scan the binding-side third(s). When only one side touches the frame we
-    # scan just that side; if both touch (page fills the width) pick the stronger.
     candidates = []
-    if touch_l:
-        li, lv, ls = scan(0.03, 0.40)
-        candidates.append(("left", li, lv, ls))
     if touch_r:
-        ri, rv, rs = scan(0.60, 0.97)
-        candidates.append(("right", ri, rv, rs))
-    side, idx, val, score = max(candidates, key=lambda c: c[3])
-    if score < min_score:
+        c = _binding_edge_crease(gray, m, "right")
+        if c is not None:
+            candidates.append(c)
+    if touch_l:
+        c = _binding_edge_crease(gray, m, "left")
+        if c is not None:
+            candidates.append(c)
+    if not candidates:
+        return None
+    # When both sides run off the frame, the binding is the side whose music ends
+    # furthest from that frame edge (a real fold/neighbour strip to remove). A
+    # clip that would only shave a hair off the frame edge is not worth doing.
+    best = max(candidates, key=lambda c: c["score"])
+    if best["score"] < 0.012 * w:
+        return None
+    return best
+
+
+def _binding_edge_crease(gray: np.ndarray, page: np.ndarray, side: str) -> dict | None:
+    """Smooth crease hugging the outer edge of this page's music on ``side``."""
+    h, w = gray.shape
+    # Black-tophat isolates thin dark strokes (music) while suppressing the broad
+    # fold/spine shadow that would otherwise bridge this page to its neighbour.
+    k = max(9, (min(h, w) // 80) | 1)
+    bh = cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT,
+                          cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    ink = ((bh > 25) & page).astype(np.uint8)
+    # Close note-to-note and staff-dash gaps, but with a kernel far narrower than
+    # the blank inter-page gutter so this page and any bled neighbour stay apart.
+    ink = cv2.morphologyEx(ink, cv2.MORPH_CLOSE,
+                           cv2.getStructuringElement(cv2.MORPH_RECT, (9, 3)))
+    n, lab, stats, cents = cv2.connectedComponentsWithStats(ink, 8)
+    cen = w // 2
+    keep = np.zeros((h, w), dtype=bool)
+    for i in range(1, n):
+        wide = stats[i, cv2.CC_STAT_WIDTH] >= 0.15 * w
+        big = stats[i, cv2.CC_STAT_AREA] >= 0.002 * h * w
+        centred = abs(cents[i][0] - cen) < 0.30 * w
+        if wide and big and centred:
+            keep |= lab == i
+    e = np.full(h, np.nan)
+    for y in range(h):
+        col = np.where(keep[y])[0]
+        if col.size:
+            e[y] = float(col[-1] if side == "right" else col[0])
+    have = ~np.isnan(e)
+    if int(have.sum()) < 20:
         return None
 
-    # Fit a smooth curve through the confident rows (the fold bends). A low-order
-    # polynomial rejects per-row noise while tracking the gentle curvature.
-    strong = rows & (val > 0.5 * max(np.median(val[rows]), 1e-6))
-    if int(strong.sum()) < 8:
+    # Robust smooth boundary: per-band outer percentile of the music edge, drop
+    # outlier bands (stray marks), then a low-order fit that tracks the gentle
+    # fold bend without buckling. A near-vertical crease is fine here.
+    yy = np.arange(h)
+    q = 92 if side == "right" else 8
+    nb = 24
+    bounds = np.linspace(0, h, nb + 1).astype(int)
+    by, bx = [], []
+    for i in range(nb):
+        s = e[bounds[i]:bounds[i + 1]]
+        s = s[~np.isnan(s)]
+        if s.size >= 8:
+            by.append(0.5 * (bounds[i] + bounds[i + 1]))
+            bx.append(float(np.percentile(s, q)))
+    if len(by) < 5:
         return None
-    coef = np.polyfit(yy[strong], idx[strong].astype(np.float64), 3)
-    curve = np.clip(np.polyval(coef, yy), 0, w - 1)
-
+    by = np.asarray(by)
+    bx = np.asarray(bx)
+    lin = np.polyfit(by, bx, 1)
+    resid = bx - np.polyval(lin, by)
+    mad = float(np.median(np.abs(resid - np.median(resid)))) + 1e-6
+    good = np.abs(resid - np.median(resid)) < 3.0 * mad
+    if int(good.sum()) >= 6:
+        by, bx = by[good], bx[good]
+    deg = 2 if len(by) >= 8 else 1
+    curve = np.polyval(np.polyfit(by, bx, deg), yy)
+    margin = int(0.006 * w)
+    curve = curve + margin if side == "right" else curve - margin
+    curve = np.clip(curve, 0.0, w - 1.0)
+    score = float(w - np.median(curve)) if side == "right" else float(np.median(curve))
     return {"side": side, "curve": curve, "score": score}
 
 
