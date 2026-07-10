@@ -520,6 +520,11 @@ def detect_crease(
     return best
 
 
+# Minimum shadow-ridge prominence (in residual-lightness units) for the fold seam
+# to be trusted as the primary crease. Below this we fall back to the content edge.
+_SEAM_CONF = 6.0
+
+
 def _neighbour_bleed_crease(stats: np.ndarray, cents: np.ndarray, n: int,
                             h: int, w: int, side: str) -> dict | None:
     """Clip a facing-page bleed strip off a blank/near-blank page.
@@ -561,6 +566,107 @@ def _neighbour_bleed_crease(stats: np.ndarray, cents: np.ndarray, n: int,
     curve = np.full(h, cut, dtype=float)
     score = float(w - cut) if side == "right" else float(cut)
     return {"side": side, "curve": curve, "score": score}
+
+
+def _fold_seam(gray: np.ndarray, page: np.ndarray, side: str,
+               inner: np.ndarray | None) -> tuple[np.ndarray, float] | None:
+    """Locate the physical binding fold from its shadow. Returns (curve, conf).
+
+    The fold casts a soft shadow into the gutter. Illumination normalization is
+    designed to *remove* that shadow (it is what makes the final scan evenly lit),
+    so the residual ``normalized - raw`` lightness isolates it: a broad, full-
+    height ridge in the otherwise-flat shadow map. Crucially, printed ink is dark
+    in *both* raw and normalized, so it cancels -- barlines, clefs and notes leave
+    no ridge, which is exactly why the old fold-valley detector's failure (latching
+    onto this page's own stacked barlines) cannot recur here.
+
+    We take, per horizontal band, the shadow ridge that is an interior local
+    maximum flanked by *lower* shadow on both sides (this rejects frame-edge
+    vignetting, which has paper on one flank and dark surround on the other), fit a
+    smooth low-order curve through the confident bands, and return it with a
+    prominence-based confidence. ``inner`` (per-row) bounds the search to the
+    binding side of this page's own content so the ridge is sought in the gutter,
+    not the music. Returns ``None`` when no coherent ridge is found.
+    """
+    h, w = gray.shape
+    L = gray
+    k = max(101, (min(h, w) // 6) | 1)
+    bg = cv2.GaussianBlur(L, (k, k), 0)
+    norm = cv2.divide(L, bg, scale=180)
+    norm = cv2.normalize(norm, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    shadow = np.clip(norm.astype(np.float32) - L.astype(np.float32), 0, None)
+    shadow[~page] = np.nan
+
+    cols_valid = page.sum(axis=0) > 0.6 * h
+    xs_valid = np.where(cols_valid)[0]
+    if xs_valid.size < 40:
+        return None
+    px0, px1 = int(xs_valid.min()), int(xs_valid.max())
+
+    nb = 14
+    bounds = np.linspace(0, h, nb + 1).astype(int)
+    yy = np.arange(h)
+    pts_y, pts_x, pts_p = [], [], []
+    for b in range(nb):
+        r0, r1 = bounds[b], bounds[b + 1]
+        band = shadow[r0:r1]
+        with np.errstate(invalid="ignore"):
+            colmean = np.nanmean(band, axis=0)
+        cov = np.sum(page[r0:r1], axis=0) > 0.6 * (r1 - r0)
+        # Search only the binding-side gutter: beyond this page's own content.
+        if inner is not None:
+            ib = float(np.nanmedian(inner[r0:r1]))
+        else:
+            ib = np.nan
+        if side == "right":
+            lo = int(ib) if np.isfinite(ib) else int(px0 + 0.55 * (px1 - px0))
+            hi = px1
+        else:
+            lo = px0
+            hi = int(ib) if np.isfinite(ib) else int(px0 + 0.45 * (px1 - px0))
+        reg = np.arange(max(px0, lo), min(px1, hi) + 1)
+        reg = reg[cov[reg]]
+        if reg.size < 12:
+            continue
+        v = colmean[reg]
+        v = np.where(np.isfinite(v), v, np.nanmin(v[np.isfinite(v)]) if np.isfinite(v).any() else 0.0)
+        vs = np.convolve(v, np.ones(9) / 9, mode="same")
+        # The fold is the INNERMOST strong shadow ridge -- the first one met
+        # crossing from this page's content out into the gutter. Anything further
+        # toward the frame (the facing page's own edge, frame vignetting) is not
+        # our seam, so we must not take the global maximum: on a page where the
+        # neighbour is in view the mask runs to the frame and the frame vignette is
+        # often the taller ridge. Collect qualifying local maxima and keep the one
+        # nearest the content side.
+        cands = []
+        for i in range(5, len(reg) - 5):
+            if vs[i] != vs[max(0, i - 7):i + 8].max():
+                continue
+            prom = vs[i] - max(vs[:i].min(), vs[i + 1:].min())
+            if prom >= 3.0:
+                cands.append((i, prom))
+        if cands:
+            sel = min(cands, key=lambda c: reg[c[0]]) if side == "right" \
+                else max(cands, key=lambda c: reg[c[0]])
+            pts_y.append(0.5 * (r0 + r1))
+            pts_x.append(float(reg[sel[0]]))
+            pts_p.append(sel[1])
+    if len(pts_y) < max(5, nb // 3):
+        return None
+    py = np.asarray(pts_y)
+    px = np.asarray(pts_x)
+    pp = np.asarray(pts_p)
+    # Robust smooth fit: reject bands whose ridge disagrees with the linear trend.
+    lin = np.polyfit(py, px, 1)
+    resid = px - np.polyval(lin, py)
+    mad = float(np.median(np.abs(resid - np.median(resid)))) + 1e-6
+    good = np.abs(resid - np.median(resid)) < 3.0 * mad
+    if int(good.sum()) >= 5:
+        py, px, pp = py[good], px[good], pp[good]
+    deg = 2 if len(py) >= 8 else 1
+    curve = np.polyval(np.polyfit(py, px, deg), yy)
+    curve = np.clip(curve, 0.0, w - 1.0)
+    return curve, float(np.median(pp))
 
 
 def _binding_edge_crease(gray: np.ndarray, page: np.ndarray, side: str) -> dict | None:
@@ -610,18 +716,46 @@ def _binding_edge_crease(gray: np.ndarray, page: np.ndarray, side: str) -> dict 
         if col.size:
             e[y] = float(col[-1] if side == "right" else col[0])
     have = ~np.isnan(e)
+
+    yy = np.arange(h)
+    margin = int(0.006 * w)
+    sgn = 1.0 if side == "right" else -1.0
+
+    # This page's own-content edge (per row, interpolated + widened): the hard
+    # floor the crease may never cross, and the inner bound for the fold search.
+    oe = np.full(h, np.nan)
+    for y in range(h):
+        col = np.where(own[y])[0]
+        if col.size:
+            oe[y] = float(col[-1] if side == "right" else col[0])
+    oidx = np.where(~np.isnan(oe))[0]
+    oe_interp = np.interp(yy, oidx, oe[oidx]) if oidx.size else None
+
     if int(have.sum()) < 20:
-        # No music of this page's own on the binding side: a blank/near-blank page
-        # such as a blank verso. If the facing page has bled a strip of its content
-        # across the fold, it hugs the binding frame edge as narrow, off-centre
-        # components; clip that strip at the fold gutter so the blank page comes out
-        # clean instead of carrying the neighbour's clefs/measure numbers.
+        # Blank / near-blank page: no music of its own, so there is no content edge
+        # to hug -- and, crucially, no content to distort. Here the true binding
+        # fold is both findable and safe to clip at: locate it from its shadow
+        # ridge and clip there so the facing page is removed cleanly, even when it
+        # is substantially in view. Fall back to the off-centre bleed edge if the
+        # fold shadow is too faint to trust.
+        seam = _fold_seam(gray, page, side, oe_interp)
+        if seam is not None and seam[1] >= _SEAM_CONF:
+            curve = np.clip(seam[0], 0.0, w - 1.0)
+            score = float(w - np.median(curve)) if side == "right" else float(np.median(curve))
+            return {"side": side, "curve": curve, "score": score}
         return _neighbour_bleed_crease(stats, cents, n, h, w, side)
 
-    # Robust smooth boundary: per-band outer percentile of the music edge, drop
-    # outlier bands (stray marks), then a low-order fit that tracks the gentle
-    # fold bend without buckling. A near-vertical crease is fine here.
-    yy = np.arange(h)
+    # Music page: clip just outside this page's own content edge rather than at the
+    # physical fold. This is deliberate -- the fold sits in the maximally
+    # foreshortened near-spine band the boundary Coons patch cannot flatten, so
+    # clipping at the fold drags that warp into the plate; clipping at the content
+    # edge excludes it, and since the neighbour lives *beyond* this page's music it
+    # is removed all the same. (The fold seam is reserved for blank pages above,
+    # where there is no content edge and nothing to warp.)
+    #
+    # Smooth low-order fit just outside the music edge -- per-band outer percentile,
+    # outlier bands dropped, deg<=2 so it tracks the gentle fold bend without
+    # buckling.
     q = 92 if side == "right" else 8
     nb = 24
     bounds = np.linspace(0, h, nb + 1).astype(int)
@@ -644,36 +778,18 @@ def _binding_edge_crease(gray: np.ndarray, page: np.ndarray, side: str) -> dict 
         by, bx = by[good], bx[good]
     deg = 2 if len(by) >= 8 else 1
     base = np.polyval(np.polyfit(by, bx, deg), yy)
-    margin = int(0.006 * w)
-    sgn = 1.0 if side == "right" else -1.0
+
     curve = base + sgn * margin
 
-    # Never clip this page's own music. The low-order fit tracks the gentle fold
-    # bend but can *undershoot* an outlier system whose binding-side end juts past
-    # the smooth trend -- e.g. a lone closing barline on the bottom system -- which
-    # would amputate real content. ``e`` is the per-row outer edge of THIS page's
-    # kept components only (a bled neighbour lives across the blank gutter as a
-    # separate component that was dropped above), so clamping the crease to sit
-    # just outside it preserves every note/barline while never reaching into the
-    # neighbour. Gaps between systems are interpolated and the edge is widened a
-    # touch vertically (running max/min) so the protection is smooth, not a notch.
-    # Never clip this page's own content. The low-order fit tracks the gentle fold
-    # bend, but individual elements can jut past that smooth trend toward the
-    # binding -- a lone closing barline on the bottom system, or the boxed part
-    # name / system bracket / leading clef on a first page, which sit further into
-    # the gutter than the staves. We clamp the crease so it never crosses the
-    # binding-side edge of THIS page's own ink (the ``own`` mask, which excludes
-    # facing-page bleed), guaranteeing every mark is preserved while the neighbour
-    # is still removed. Gaps between rows are interpolated and the edge widened a
-    # touch vertically so the protection is smooth, not a notch.
-    oe = np.full(h, np.nan)
-    for y in range(h):
-        col = np.where(own[y])[0]
-        if col.size:
-            oe[y] = float(col[-1] if side == "right" else col[0])
-    oidx = np.where(~np.isnan(oe))[0]
-    if oidx.size:
-        env = np.interp(yy, oidx, oe[oidx]).astype(np.float32).reshape(-1, 1)
+    # Content floor (invariant): the crease may never cross the binding-side edge
+    # of THIS page's own ink (the ``own`` mask, which excludes facing-page bleed).
+    # This guarantees no note/barline/clef/label is ever amputated -- even if the
+    # fold seam is misplaced -- and rescues elements that jut past a smooth fit
+    # toward the binding (a lone bottom-system barline, a part-name box, brackets).
+    # The edge is widened a touch vertically so the protection is smooth, not a
+    # notch.
+    if oe_interp is not None:
+        env = oe_interp.astype(np.float32).reshape(-1, 1)
         ksz = max(3, int(0.01 * h) | 1)
         kern = cv2.getStructuringElement(cv2.MORPH_RECT, (1, ksz))
         if side == "right":

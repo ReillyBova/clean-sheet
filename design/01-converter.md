@@ -123,27 +123,42 @@ signatures, part-name boxes, system brackets on odd pages).
    needed another sub-rule (blank verso vs title box vs recto bleed), which is a
    symptom of not modelling the fold itself.
 
-3. **Hybrid seam detector (in progress — the intended root fix).** Actually find
-   the physical fold, drop the "neighbour out of view" assumption, and keep the
-   content edge only as a safety floor. Cues, fused:
+3. **Fold-shadow seam — for blank pages (shipped).** We *do* find the physical
+   fold, but only where it is both findable and safe to clip at: a blank / near-
+   blank page (a blank verso, a publisher "BLANK PAGE") that has no music of its
+   own. There the content-edge has nothing to hug, and — critically — there is no
+   content to distort, so clipping at the true fold is a clean win even when the
+   facing page is substantially in view (dropping the "neighbour out of view"
+   assumption for exactly the case that needed it). How the fold is found
+   (`_fold_seam`):
    - **Shadow map = `normalized − raw` lightness.** The fold shadow is exactly
      what illumination-normalization removes, so this residual isolates it as a
-     broad, full-height dark band with content mostly gone. *Prototype confirmed
-     the signal is present.*
-   - **Interior-valley test:** the seam must be a shadow ridge flanked by
-     *brighter paper on both sides* — this rejects frame-edge vignetting (paper on
-     one side, dark surround on the other), which a naïve argmax otherwise picks.
-   - **Full-height continuity:** the fold shadow is present in the blank rows
-     *between* systems; barlines are not — cleanly rejects content.
-   - **Geometry cue:** the paper's top/bottom boundary curves kink at the spine,
-     so the seam-x shows up as a curvature spike / notch independent of shadow and
-     content.
-   - **Content-edge floor (invariant):** clamp so the clip can never cross this
-     page's own music, even if every cue misfires.
+     broad, full-height ridge with content gone. Printed ink is dark in *both*
+     images and cancels, so barlines/clefs leave no ridge — the old valley
+     detector's failure (latching onto this page's barlines) cannot recur.
+   - **Innermost strong ridge, flanked on both sides.** The seam is the *first*
+     shadow ridge crossing from the page into the gutter (a local maximum with
+     lower shadow on both flanks). Taking the innermost — not the global maximum —
+     is essential: when the neighbour is in view the mask runs to the frame, and
+     the frame-edge vignette is often the *taller* ridge; the fold is the one
+     nearer the content.
+   - Per-band ridge → robust low-order curve fit → **prominence confidence gate**;
+     below it we fall back to `_neighbour_bleed_crease` (clip the off-centre bleed
+     cluster at its page-ward edge).
 
-   Status: prototyped; the shadow cue localizes the fold on a title page and the
-   failure mode (naïve argmax grabbing the mask boundary) is understood. Being
-   built behind the regression harness.
+   > **Why not use the seam on music pages too?** We tried; the regression harness
+   > caught it. On a page *with* music, clipping at the true fold drags the
+   > maximally-foreshortened near-spine band (which the boundary Coons patch cannot
+   > flatten) into the plate, warping the binding-side systems. Clipping at the
+   > **content edge** instead excludes that band, and since the neighbour lives
+   > *beyond* this page's music it is removed all the same. So: **content-edge for
+   > music pages, fold-seam for blank pages.** Music-page output is byte-identical
+   > with or without the seam code.
+
+Remaining honest caveat: on a music page whose facing page is *so* far in view
+that its content crosses this page's music edge, the content-edge rule would not
+fully exclude it. Not yet observed in the corpus; if it arises, the fix is to
+extend the seam (with the same near-spine caveat) to bound the music-page clip.
 
 ### Geometry decides the binding side
 
@@ -218,7 +233,8 @@ the good ones.
   (foreshortening) that the boundary Coons patch and rigid straightener leave.
 - **Per-system straightening decisions** so a single bowing end-of-system is
   ironed flat without the page average hiding it.
-- **Finish the hybrid seam detector** and retire the content-edge heuristics to a
-  pure safety floor.
+- **Finish generalizing the seam** if a music page ever shows a facing page in
+  view *past* its own music edge (see the caveat above) — extend the fold seam to
+  bound the music-page clip while still excluding the near-spine warp band.
 - **Grow the "perfect" bucket** over time — the standing goal is fewer "ok" pages,
   more indistinguishable-from-a-real-scan pages.
