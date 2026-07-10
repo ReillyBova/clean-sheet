@@ -15,3 +15,6 @@ venv/
 
 # Regression goldens (generated locally via tools/regression_check.py capture)
 tools/regression/golden/
+
+# Hand-labeled seam ground truth (validation fixture, references local scans)
+tools/seam_labels.json
