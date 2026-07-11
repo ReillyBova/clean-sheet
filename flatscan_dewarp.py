@@ -137,6 +137,39 @@ def _shift_by_corr(prof: np.ndarray, ref: np.ndarray, maxshift: int) -> tuple[fl
     return best, bestval
 
 
+def _smooth_disp_across_systems(disp_o: np.ndarray, scale: float = 4.0,
+                                iters: int = 80) -> np.ndarray:
+    """Regularize per-system displacement curves for vertical continuity.
+
+    ``disp_o`` is ``(S, w)`` -- one per-column displacement curve per system,
+    ordered top-to-bottom. The page's warp field is continuous in y, so a
+    system's displacement at a given column should vary smoothly from the staves
+    above to those below. A system whose value disagrees sharply with that trend
+    (typically a binding-side end where the correlation/trace went blind and
+    latched onto a wrong match) is an outlier; left alone it both under-corrects
+    that end and, differing from its neighbours, collapses the inter-system gap
+    into a vertical "scrunch".
+
+    Each iteration relaxes every entry toward the mean of its vertical
+    neighbours, weighted so entries already consistent with the trend are kept
+    (a linear trend is a fixed point -- smooth curl is preserved) while strong
+    outliers are pulled onto it. Converges to identity when all systems agree, so
+    clean pages are untouched. Returns the regularized ``(S, w)`` array.
+    """
+    S = disp_o.shape[0]
+    if S < 3:
+        return disp_o.copy()
+    d = disp_o.copy()
+    for _ in range(iters):
+        up = np.vstack([d[:1], d[:-1]])
+        dn = np.vstack([d[1:], d[-1:]])
+        sm = 0.5 * (up + dn)
+        resid = d - sm
+        wkeep = 1.0 / (1.0 + (resid / scale) ** 2)   # ~1 consistent, ->0 outlier
+        d = wkeep * d + (1.0 - wkeep) * sm
+    return d
+
+
 def compute_displacement(gray: np.ndarray):
     """Return ((map_x, map_y), info) for the dewarp, or (None, info) if N/A."""
     h, w = gray.shape
@@ -207,6 +240,14 @@ def compute_displacement(gray: np.ndarray):
     order = np.argsort(tops)
     tops, bots, disp_o = tops[order], bots[order], disp_full[order]
     S = len(tops)
+
+    # Enforce vertical continuity of the warp field: a system whose end
+    # displacement disagrees sharply with the staves above/below is almost always
+    # a bad binding-side measurement (the correlation latches onto a plausible
+    # but wrong match where the lines foreshorten). Pull such outliers onto the
+    # neighbours' smooth trend, then re-flatten each system to its own mean.
+    disp_o = _smooth_disp_across_systems(disp_o)
+    disp_o = disp_o - disp_o.mean(axis=1, keepdims=True)
 
     # Displacement is held CONSTANT across each system's band (rigid translation,
     # preserving staff spacing) via control points at the band edges; linear
@@ -369,6 +410,15 @@ def _staff_guided_displacement(gray: np.ndarray, max_disp_factor: float = 8.0):
     tops = tops[order]; bots = bots[order]
     offsets = [offsets[i] for i in order]
     S = len(tops)
+
+    # Enforce vertical continuity: pull any system's binding-side offset that
+    # disagrees with the staves above/below onto their smooth trend, then
+    # re-flatten. Prevents the under-corrected/divergent ends that scrunch the
+    # inter-system gap (see _smooth_disp_across_systems).
+    if S >= 3:
+        disp_o = _smooth_disp_across_systems(np.array(offsets, np.float32))
+        disp_o = disp_o - disp_o.mean(axis=1, keepdims=True)
+        offsets = [disp_o[i] for i in range(S)]
 
     # Control points at each band's edges (strictly increasing y); the per-column
     # offset is constant across a band and blends linearly through the gaps.
