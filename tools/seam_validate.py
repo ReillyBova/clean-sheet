@@ -37,7 +37,7 @@ def gt_x(points, yf):
 def main():
     data = json.load(open(LABELS))
     pages, errs = [], []
-    print(f"{'case':22s} {'side':5s} {'cue':>10s} {'conf':>6s} {'mean%':>6s} {'max%':>6s}")
+    print(f"{'case':22s} {'side':5s} {'cue':>13s} {'conf':>6s} {'mean%':>6s} {'max%':>6s} {'top%':>6s} {'bot%':>6s}")
     for c in data["cases"]:
         if not c["points"]:
             continue
@@ -57,11 +57,17 @@ def main():
             pages.append(Image.fromarray(rgb))
             continue
 
-        rerr = [abs(res["curve"][int(yf*(h-1))]/w - gt_x(c["points"], yf)) * 100
-                for yf in np.linspace(0.1, 0.9, 33)]
+        # endpoint-inclusive metric: sample the full fold incl. the top/bottom
+        # ends where extrapolation is weakest (the old [0.1,0.9] hid endpoint error)
+        def ex(yf):
+            return abs(res["curve"][int(yf*(h-1))]/w - gt_x(c["points"], yf)) * 100
+        rerr = [ex(yf) for yf in np.linspace(0.03, 0.97, 33)]
+        te = max(ex(0.03), ex(0.05))
+        be = max(ex(0.95), ex(0.97))
         errs.append(max(rerr))
-        print(f"{c['part']+' p'+str(c['page']):22s} {side:5s} {res['cue']:>10s} "
-              f"{res['conf']:6.3f} {np.mean(rerr):6.2f} {max(rerr):6.2f}")
+        print(f"{c['part']+' p'+str(c['page']):22s} {side:5s} {res['cue']:>13s} "
+              f"{res['conf']:6.3f} {np.mean(rerr):6.2f} {max(rerr):6.2f} "
+              f"{te:6.2f} {be:6.2f}")
 
         ov = rgb.copy()
         # ground truth (green)

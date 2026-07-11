@@ -25,14 +25,35 @@ RAW_DIR = os.path.expanduser("~/Downloads/Rach 2")
 OUT_DIR = os.path.expanduser("~/Downloads/Rach 2 - seam GT extra")
 LABELS = os.path.join(HERE, "seam_labels.json")
 
-# (part, file, pdf_page)
-EXTRA = [
-    ("Clarinet I", "Rach 2 Clarinet I.pdf", 21),
-    ("Clarinet I", "Rach 2 Clarinet I.pdf", 27),
-    ("Horn II",    "Rach 2 Horn II.pdf",    3),
-    ("Violin I",   "Rach 2 Violin I_l.pdf", 3),
-    ("Trombone I", "Rach 2 Trombone I_l.pdf", 3),
+# (part, pdf_page) -- raw file resolved automatically (tries "Rach 2 {part}.pdf"
+# then the "_l" variant). Full v2-run seam-issue set to hand-mark.
+EXTRA_PAGES = [
+    ("Bass", 3), ("Bass", 13), ("Bass", 19),
+    ("Cello", 19),
+    ("Clarinet I", 17),
+    ("Clarinet II", 17),
+    ("Flute I", 15), ("Flute I", 17),
+    ("Flute III", 3),
+    ("Horn I", 4), ("Horn I", 7), ("Horn I", 10),
+    ("Horn II", 6), ("Horn II", 8),
+    ("Horn IV", 4), ("Horn IV", 6),
+    ("Oboe II", 2), ("Oboe II", 12),
+    ("Percussion", 2),
+    ("Trombone I", 14),
+    ("Trumpet II", 7),
+    ("Viola", 29),
+    ("Violin I", 29),
 ]
+
+
+def resolve_raw(part):
+    for name in (f"Rach 2 {part}.pdf", f"Rach 2 {part}_l.pdf"):
+        if os.path.exists(os.path.join(RAW_DIR, name)):
+            return name
+    raise FileNotFoundError(f"no raw PDF for {part}")
+
+
+EXTRA = [(part, resolve_raw(part), page) for (part, page) in EXTRA_PAGES]
 
 MIN_SAT, MIN_VAL, MIN_AREA = 200, 150, 40
 
