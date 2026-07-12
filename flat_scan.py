@@ -425,6 +425,12 @@ def segment_page(img_bgr: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]
     # mat, etc.) and shadowed paper stays on the paper side of the threshold, so
     # curl/edge shadows no longer read as background.
     _, seed = cv2.threshold(norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Faithful paper/background map for the boundary repair, captured BEFORE the
+    # opening below erodes ~open_k/2 px off every paper edge. Repair uses it to
+    # tell a real (curved) page edge from a background bulge, so it must reflect
+    # the paper's true extent right up to the edge; the eroded post-open seed
+    # would under-report paper in exactly the thin edge sliver being judged.
+    paper_ref = seed.copy()
 
     close_k = max(17, (min(h, w) // 160) | 1)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k, close_k))
@@ -459,10 +465,10 @@ def segment_page(img_bgr: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]
     # the dominant page component for a clean single-contour boundary.
     mask = largest_component(mask)
     # Repair localized concave defects (finger/shadow notches) so they are not
-    # propagated into the page interior by the Coons patch. Pass the normalized
-    # Otsu paper map so a genuine curved page edge is never mistaken for an
-    # outward bulge and chorded flat.
-    mask = repair_boundary_defects(mask, paper=seed)
+    # propagated into the page interior by the Coons patch. Pass the pre-open
+    # normalized Otsu paper map so a genuine curved page edge is never mistaken
+    # for an outward bulge and chorded flat.
+    mask = repair_boundary_defects(mask, paper=paper_ref)
 
     debug = {
         "01_lightness_raw.png": L,
