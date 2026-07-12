@@ -326,11 +326,24 @@ export class Cinematic {
     pp.set(c); hp.set(c);
     this.pageGeo.attributes.position.needsUpdate = true;
     this.hlGeo.attributes.position.needsUpdate = true;
-    // outline
+    // outline — traces the page mesh perimeter, but nudged outward from the
+    // page centroid by INSET_UNDO so it sits on the true paper edge rather than
+    // the 0.5%-inset sampling boundary the mesh/rasters share. (inset_edges in
+    // the pipeline shrinks the quad about its centroid by 0.5% to keep the dark
+    // edge sliver out of the cleaned rasters; this is its exact inverse, applied
+    // only to the display outline.)
     const op = this.outGeo.attributes.position.array;
+    let ocx = 0, ocy = 0;
+    for (let n = 0; n < this.perim.length; n++) {
+      const k = this.perim[n]; ocx += c[k*3]; ocy += c[k*3+1];
+    }
+    ocx /= this.perim.length; ocy /= this.perim.length;
+    const INSET_UNDO = 1.0055;
     for (let n = 0; n < this.perim.length; n++) {
       const k = this.perim[n];
-      op[n*3] = c[k*3]; op[n*3+1] = c[k*3+1]; op[n*3+2] = 0;
+      op[n*3]   = ocx + (c[k*3]   - ocx) * INSET_UNDO;
+      op[n*3+1] = ocy + (c[k*3+1] - ocy) * INSET_UNDO;
+      op[n*3+2] = 0;
     }
     this.outGeo.attributes.position.needsUpdate = true;
     // grid
