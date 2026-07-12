@@ -50,11 +50,20 @@ const shuffle = (a) => {
   return r;
 };
 
+// The showcase always opens on the Ruslan Violin I part, then shuffles the rest —
+// a recognizable, consistent opener each cycle.
+const LEAD_ID = "russlan";
+const makePlaylist = (examples) => {
+  const lead = examples.find((e) => e.id === LEAD_ID);
+  if (!lead) return shuffle(examples);
+  return [lead, ...shuffle(examples.filter((e) => e !== lead))];
+};
+
 async function boot() {
   const demo = await fetch("assets/demo.json").then((r) => r.json());
   // Support the legacy single-example shape as well as the {examples:[...]} list.
   const examples = demo.examples || [demo];
-  state.playlist = shuffle(examples);
+  state.playlist = makePlaylist(examples);
   state.idx = 0;
   // Optional ?ex=<id> pins a specific example first (sharing / testing).
   const q0 = new URLSearchParams(location.search);
@@ -112,7 +121,7 @@ async function loadExample(ex) {
 function nextExample() {
   state.idx += 1;
   if (state.idx >= state.playlist.length) {
-    state.playlist = shuffle(state.playlist);
+    state.playlist = makePlaylist(state.playlist);
     state.idx = 0;
   }
   loadExample(state.playlist[state.idx]);
@@ -129,9 +138,6 @@ function jumpTo(id) {
   setPlaying(true);
 }
 
-const shortLabel = (l) =>
-  (l && l.includes("—") ? l.split("—").pop() : l || "").replace(/\(.*\)/, "").trim();
-
 function buildReel(examples) {
   els.reel.innerHTML = "";
   state.reelItems = {};
@@ -140,8 +146,7 @@ function buildReel(examples) {
     b.className = "reel-item"; b.type = "button"; b.role = "tab";
     b.title = ex.label || ex.id;
     b.innerHTML =
-      `<img class="reel-thumb" loading="lazy" alt="${ex.label || ex.id}" src="assets/${ex.photo.image}">` +
-      `<span class="reel-label">${shortLabel(ex.label)}</span>`;
+      `<img class="reel-thumb" loading="lazy" alt="${ex.label || ex.id}" src="assets/${ex.photo.image}">`;
     b.addEventListener("click", () => jumpTo(ex.id));
     els.reel.appendChild(b);
     state.reelItems[ex.id] = b;

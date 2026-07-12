@@ -64,8 +64,8 @@ code {
 }
 .brand-name {
   font-family: "Fraunces", serif;
-  font-weight: 600;
-  font-size: 1.25rem;
+  font-weight: 700;
+  font-size: 1.6rem;
   letter-spacing: 0.01em;
 }
 .ghlink {
@@ -225,14 +225,6 @@ code {
   border-color: var(--gold);
   box-shadow: 0 8px 24px -8px rgba(224,169,74,0.5);
 }
-.reel-label {
-  font-size: 0.66rem;
-  line-height: 1.25;
-  color: var(--muted);
-  text-align: center;
-  max-width: 76px;
-}
-.reel-item.active .reel-label { color: var(--gold-soft); }
 
 /* ---------- readout ---------- */
 .readout { grid-area: readout; padding-top: 6px; }
