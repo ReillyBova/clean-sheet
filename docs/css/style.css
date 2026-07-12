@@ -109,7 +109,9 @@ code {
   padding: 0 28px 40px;
   display: grid;
   grid-template-columns: auto 1fr;
-  grid-template-areas: "viewport readout";
+  grid-template-areas:
+    "viewport readout"
+    "reel     reel";
   gap: 26px 48px;
   align-items: center;
 }
@@ -180,6 +182,57 @@ code {
 }
 .stage-badge #stageIndex { color: var(--gold-soft); font-weight: 700; }
 .stage-total { color: var(--muted); margin-left: 3px; }
+
+/* ---------- examples reel (carousel) ---------- */
+.reel {
+  grid-area: reel;
+  margin-top: 30px;
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 6px 2px 12px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(224,169,74,0.35) transparent;
+}
+.reel::-webkit-scrollbar { height: 7px; }
+.reel::-webkit-scrollbar-thumb { background: rgba(224,169,74,0.3); border-radius: 4px; }
+.reel-item {
+  flex: 0 0 auto;
+  width: 76px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.6;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.reel-item:hover { opacity: 0.9; transform: translateY(-2px); }
+.reel-item.active { opacity: 1; }
+.reel-thumb {
+  width: 76px; height: 96px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #0d0a07;
+  box-shadow: 0 8px 20px -10px rgba(0,0,0,0.7);
+  border: 2px solid transparent;
+  transition: border-color 0.25s ease, box-shadow 0.25s ease;
+}
+.reel-item.active .reel-thumb {
+  border-color: var(--gold);
+  box-shadow: 0 8px 24px -8px rgba(224,169,74,0.5);
+}
+.reel-label {
+  font-size: 0.66rem;
+  line-height: 1.25;
+  color: var(--muted);
+  text-align: center;
+  max-width: 76px;
+}
+.reel-item.active .reel-label { color: var(--gold-soft); }
 
 /* ---------- readout ---------- */
 .readout { grid-area: readout; padding-top: 6px; }

@@ -28,6 +28,7 @@ const els = {
   track: $("#track"),
   fill: $("#trackFill"),
   ticks: $("#ticks"),
+  reel: $("#reel"),
   playBtn: $("#playBtn"),
   playLabel: $("#playLabel"),
   replayBtn: $("#replayBtn"),
@@ -64,6 +65,7 @@ async function boot() {
 
   state.cine = new Cinematic(els.gl);
   buildTicks();
+  buildReel(examples);
   await loadExample(state.playlist[0]);
   els.gl.classList.add("show");
   setPhase(0, true);
@@ -100,6 +102,7 @@ async function loadExample(ex) {
     await state.cine.init(ex, photo, ink);
   } catch (e) { console.warn(e); }
   state.g = 0; state.holding = 0; state.phase = -1;
+  setActiveReel(ex.id);
   render();
   state.switching = false;
 }
@@ -113,6 +116,41 @@ function nextExample() {
     state.idx = 0;
   }
   loadExample(state.playlist[state.idx]);
+}
+
+// Jump straight to a chosen example (from the reel); auto-advance then continues
+// through the shuffled playlist from that point.
+function jumpTo(id) {
+  if (state.switching) return;
+  const i = state.playlist.findIndex((e) => e.id === id);
+  if (i < 0 || state.playlist[i].id === state.playlist[state.idx].id) return;
+  state.idx = i;
+  loadExample(state.playlist[i]);
+  setPlaying(true);
+}
+
+const shortLabel = (l) =>
+  (l && l.includes("—") ? l.split("—").pop() : l || "").replace(/\(.*\)/, "").trim();
+
+function buildReel(examples) {
+  els.reel.innerHTML = "";
+  state.reelItems = {};
+  examples.forEach((ex) => {
+    const b = document.createElement("button");
+    b.className = "reel-item"; b.type = "button"; b.role = "tab";
+    b.title = ex.label || ex.id;
+    b.innerHTML =
+      `<img class="reel-thumb" loading="lazy" alt="${ex.label || ex.id}" src="assets/${ex.photo.image}">` +
+      `<span class="reel-label">${shortLabel(ex.label)}</span>`;
+    b.addEventListener("click", () => jumpTo(ex.id));
+    els.reel.appendChild(b);
+    state.reelItems[ex.id] = b;
+  });
+}
+
+function setActiveReel(id) {
+  const items = state.reelItems || {};
+  Object.keys(items).forEach((k) => items[k].classList.toggle("active", k === id));
 }
 
 function buildTicks() {
