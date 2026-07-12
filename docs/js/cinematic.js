@@ -195,12 +195,24 @@ export class Cinematic {
     this.hl.position.z = 0.01;
     this.scene.add(this.hl);
 
-    // outline (perimeter order, draws on, morphs)
+    // outline (perimeter order, draws on, morphs). Its SRC positions come from a
+    // separate display-only boundary (demo.outline) that hugs the true paper
+    // edge — the page mesh boundary is inset+smoothed to match the rasters and
+    // sits ~1% inside the real edge. Falls back to the mesh perimeter if absent.
     this.perim = [];
     for (let i = 0; i < GW; i++) this.perim.push(i);                         // top L→R
     for (let j = 1; j < GH; j++) this.perim.push(j * GW + (GW - 1));         // right
     for (let i = GW - 2; i >= 0; i--) this.perim.push((GH - 1) * GW + i);    // bottom
     for (let j = GH - 2; j >= 0; j--) this.perim.push(j * GW);              // left
+    this.outSrc = new Float32Array(this.perim.length * 2);
+    this.outDst = new Float32Array(this.perim.length * 2);
+    const ol = demo.outline;
+    for (let n = 0; n < this.perim.length; n++) {
+      const k = this.perim[n];
+      if (ol && ol[n]) { this.outSrc[n*2] = ol[n][0]; this.outSrc[n*2+1] = ol[n][1] * aspect; }
+      else { this.outSrc[n*2] = this.src2d[k*2]; this.outSrc[n*2+1] = this.src2d[k*2+1]; }
+      this.outDst[n*2] = this.dst2d[k*2]; this.outDst[n*2+1] = this.dst2d[k*2+1];
+    }
     this.outGeo = new THREE.BufferGeometry();
     this.outGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(this.perim.length * 3), 3));
     this.outMat = new THREE.LineBasicMaterial({ color: GOLD_SOFT, transparent: true, opacity: 0 });
@@ -326,23 +338,13 @@ export class Cinematic {
     pp.set(c); hp.set(c);
     this.pageGeo.attributes.position.needsUpdate = true;
     this.hlGeo.attributes.position.needsUpdate = true;
-    // outline — traces the page mesh perimeter, but nudged outward from the
-    // page centroid by INSET_UNDO so it sits on the true paper edge rather than
-    // the 0.5%-inset sampling boundary the mesh/rasters share. (inset_edges in
-    // the pipeline shrinks the quad about its centroid by 0.5% to keep the dark
-    // edge sliver out of the cleaned rasters; this is its exact inverse, applied
-    // only to the display outline.)
+    // outline — morph its own true-edge SRC toward the flat plate perimeter,
+    // matching the page's morphT/lift so it tracks the lifting page while the
+    // find-the-page highlight sits flush on the real paper edge (morphT≈0).
     const op = this.outGeo.attributes.position.array;
-    let ocx = 0, ocy = 0;
     for (let n = 0; n < this.perim.length; n++) {
-      const k = this.perim[n]; ocx += c[k*3]; ocy += c[k*3+1];
-    }
-    ocx /= this.perim.length; ocy /= this.perim.length;
-    const INSET_UNDO = 1.0055;
-    for (let n = 0; n < this.perim.length; n++) {
-      const k = this.perim[n];
-      op[n*3]   = ocx + (c[k*3]   - ocx) * INSET_UNDO;
-      op[n*3+1] = ocy + (c[k*3+1] - ocy) * INSET_UNDO;
+      op[n*3]   = lerp(this.outSrc[n*2],   this.outDst[n*2],   morphT);
+      op[n*3+1] = lerp(this.outSrc[n*2+1], this.outDst[n*2+1], morphT) - lift;
       op[n*3+2] = 0;
     }
     this.outGeo.attributes.position.needsUpdate = true;

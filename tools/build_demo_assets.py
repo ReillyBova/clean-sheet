@@ -100,11 +100,28 @@ def build_example(eid, label, pdf, page1, booklet, dims):
     # reprojection morph grid: source (photo) positions per mesh vertex, 0..1.
     # Uses rectify's (inset) edges so the page mesh matches rect.jpg/ink.jpg
     # exactly -- if the mesh traced a wider boundary than the rasters, the
-    # lift->rect crossfade would show a ~0.5% content shift (a blur). The "find
-    # the page" outline is nudged back out to the true paper edge in the webapp
-    # (cinematic.js), where it is display-only and needn't match the rasters.
+    # lift->rect crossfade would show a ~0.5% content shift (a blur).
     mx, my = fs.coons_maps(edges, GRID_W, GRID_H)
     src = np.stack([mx / (W - 1), my / (H - 1)], axis=-1)
+
+    # Display-only "find the page" outline. The mesh boundary above is inset 0.5%
+    # AND heavily smoothed (0.045) to match the rasters, which together sit ~1%
+    # inside the true paper edge -- visibly not flush. Trace a separate, barely
+    # smoothed, NON-inset boundary that hugs the real edge, sampled as the mesh
+    # perimeter (same order the webapp walks it) so the webapp can morph it by
+    # index alongside the page. Mesh/rasters are untouched (no blur).
+    o_contour = fs.largest_external_contour(mask)
+    o_corners = fs.find_corners_from_contour(o_contour)
+    o_edges = fs.orient_edges(fs.split_into_edges(o_contour, o_corners),
+                              o_corners, n=1200, smooth=0.006)
+    omx, omy = fs.coons_maps(o_edges, GRID_W, GRID_H)
+    osrc = np.stack([omx / (W - 1), omy / (H - 1)], axis=-1)
+    operi = []
+    for i in range(GRID_W): operi.append(osrc[0, i])
+    for j in range(1, GRID_H): operi.append(osrc[j, GRID_W - 1])
+    for i in range(GRID_W - 2, -1, -1): operi.append(osrc[GRID_H - 1, i])
+    for j in range(GRID_H - 2, 0, -1): operi.append(osrc[j, 0])
+    outline = np.round(np.array(operi), 5).tolist()
 
     # staff geometry (for the "find the staves" overlay and its ironing) + the
     # straighten UV-morph grid (irons the rect texture flat as a real warp). Reuse
@@ -143,6 +160,7 @@ def build_example(eid, label, pdf, page1, booklet, dims):
         "rect": f"stages/{eid}/rect.jpg",
         "ink": f"stages/{eid}/ink.jpg",
         "grid": {"w": GRID_W, "h": GRID_H, "src": src.reshape(-1, 2).round(5).tolist()},
+        "outline": outline,
         "straighten": straighten,
         "staves": staves,
         "output_aspect": round(w_in / h_in, 5),
