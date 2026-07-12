@@ -178,44 +178,108 @@ straight, horizontal, parallel:
   **systems** (5-line combs) by horizontal-ink projection.
 - Two candidate warps, keep whichever leaves staves flatter (`_staff_flatness`):
   - **Guided** (`_staff_guided_displacement`): trace each system's lines and iron
-    the comb flat per column. Great on curled binding-side ends.
+    the comb flat per column. Great on curled binding-side ends, and now the
+    default winner on essentially every real page (accepted immediately when
+    flatness ≤ `_GUIDED_ACCEPT_PX`, skipping the slower rigid candidate).
   - **Rigid** (`_straighten_staves_rigid`): per-system rigid vertical translation,
-    blended across gaps, iterated a few passes. Robust on clean scans. **Staff
-    spacing is preserved deliberately** — the shift is uniform per column so
-    merged/close lines never smear; this is also why it can't undo binding
-    *compression*.
-- **Raw-threshold fallback in the tracer** (`_trace_staff_lines`): `_emphasize`
-  (horizontal opening) drops sloped/curling lines near the binding, so the tracer
-  would hold its last value flat and the correction would over/under-shoot. The
-  fallback follows the real curling line into the binding using nearest raw ink to
-  the prediction.
+    blended across gaps, iterated a few passes. Robust fallback on scans where the
+    trace is unclear. **Staff spacing is preserved deliberately** — the shift is
+    uniform per column so merged/close lines never smear; this is also why it
+    can't undo binding *compression*.
+
+**The tracer is a coupled comb** (`_trace_staff_lines`). Instead of following each
+of the five lines independently, all five share **one centre curve** and **one
+slowly-varying spacing**: `y_k(x) = centre(x) + scale(x)·offset_k`, where
+`offset_k` is the fixed relative geometry of the comb and `scale`/`centre` are
+fit per column with stiff ridge regularization and IRLS outlier rejection. This is
+what makes the trace robust: a line that jumps onto a tie, note head, slur, or
+bar line becomes a *spacing outlier* and is overridden by the group rather than
+dragging the warp off the staff. Supporting pieces:
+
+- **`_snap_comb`** trims phantom endpoint lines (a slur or ledger line mistaken
+  for a 6th/0th staff line) by spacing uniformity **and** ink strength; interior
+  gaps are never touched, so genuinely faint real lines survive.
+- **`_staff_hextent` + shared page extent**: the correction is truncated to the
+  staves' real horizontal extent (first inked column → final bar line), taken as
+  the **median across systems** since the whole block shares one binding. This
+  rescues bottom systems whose own bar line under-detects, and stops the warp from
+  fanning out in the steep foreshortened gutter.
+- **Slope-extrapolated tails**: past the extent the comb is continued along the
+  measured curl slope (single slope → the lines keep their spacing and can never
+  fold), instead of being frozen flat — which used to leave a visible hook where
+  the correction stopped.
+- **Honest flatness metric**: `_staff_flatness` measures the *re-traced* comb
+  centre of the remapped ink (robust 2..98 percentile peak-to-peak), not the
+  warped guide lines (which are circular and always look flat). An optional
+  **second guided refinement pass** re-traces the near-flat output and is kept
+  only when it is measurably flatter, driving residual trace error toward ~1px.
+
 - Then `deskew_barlines`, `align_system_margins`, `align_right_margin` (square the
-  crease-side margin), `center_content`.
+  crease-side margin), `center_content` — all run **after** straightening, so any
+  slight page-level skew comes from these margin steps, not the tracer.
 
-### Known limitation: localized end-of-system bows
+### Formerly: localized end-of-system bows
 
-The method chooses **one** warp for the whole page by *average* flatness. A single
-system that bows sharply near the bottom edge can survive because the page average
-still looks acceptable. Fixing this well (per-system method choice / stronger
-local flattening) is an open dewarp problem — tracked because ruler-straight ends
-are a hard requirement.
+The old tracer chose one warp for the whole page by *average* flatness, so a
+single system bowing sharply at the binding tail could survive because the page
+average still looked acceptable. The coupled-comb tracer with shared extent and
+slope-extrapolated tails resolved this: the five flagged binding-tail pages
+(Horn IV p6's serpentine ink included) now land sub-1.5px through the full
+pipeline, with no regression on good pages or on grand-staff (Percussion) /
+bass-clef (Timpani) structures. True binding *compression* (horizontal
+foreshortening) is still not undone — see open problems.
 
 ## Assembly, batch, parity
 
 - Size to the physical page (`--width-in/--height-in/--dpi`); optional trailing
   blank so the final count is even for double-sided printing (`--no-pad-even` to
   disable).
+- **Lossless PDF encoding** (`write_pdf_from_images`): each page is saved as a
+  **maximally-compressed grayscale PNG** (`save_output_image`, zlib level 9) and
+  embedded **verbatim** via `img2pdf` — the PNG's compressed stream is copied into
+  the PDF with no decode/re-encode, so rasters stay bit-identical while a fixed
+  page size stretches every image to the exact physical dimensions (DPI
+  preserved). This replaced ReportLab's `drawImage`, which silently re-deflated
+  every page at a weak level and inflated files ~40% (≈2641 → 1887 KB/page here).
+  Soft-gray music at 400 dpi is ~1.8 MB/page of genuine anti-aliased content
+  (~85% pure white, ~15% mid-gray ink at full 256 levels); that is the lossless
+  floor — JPEG q95 is actually *larger*, and stronger deflate (zopfli/Pillow)
+  saves only ~3%.
 - `--starts-on-even` / `--starts-on-even-files` / `starts_on_even.txt` insert a
   leading blank for parts whose first scanned page is even, so page parity lines
   up across a set.
-- **Batch mode**: a directory in → `<input>-Processed` out. Per-part page-number
-  offsets (some parts have 2 cover pages, so printed page 1 = PDF page 3) are
-  **not uniform even within an instrument family** and must be checked per part.
-- **Combine** into named books is a separate concatenation step (grouping:
-  Flute I/II/III, Oboe I/II/III, Clarinet I/II + Bass Cl, Bassoon I/II, Horn
-  I–IV, Trumpet I/II/III, Low Brass = Trombones/Bass Tbn/Tuba, Timpani
-  Percussion, then strings). Fixing a page splices into its book by index rather
-  than regenerating the whole set.
+- **Batch mode**: a directory in → `<input>-Processed` out. It is **resume-aware
+  and skips outputs whose names match the sources**, so before a full regen you
+  must clear/move the `-Processed` folder (renamed score-order outputs are *not*
+  recognized). `--jobs N` parallelizes pages; `--clean-work` deletes per-page work
+  dirs. Per-part page-number offsets (some parts have 2 cover pages, so printed
+  page 1 = PDF page 3) are **not uniform even within an instrument family** and
+  must be checked per part.
+- **Combine** into named books is a separate concatenation step
+  (`pypdfium2.import_pages`), producing `NN. <Work> • <Part>.pdf` in score order.
+  Fixing a page splices into its book by index rather than regenerating the set.
+
+### Rach 2 run recipe (verified)
+
+The reference batch. Rach 2 needs **no** `--starts-on-even`:
+
+```bash
+python3 flat_scan.py "$HOME/Downloads/Rach 2" \
+  --width-in 8.9375 --height-in 12 --dpi 400 \
+  --straighten --booklet --jobs 4 --clean-work
+```
+
+- Raw `~/Downloads/Rach 2/` (29 parts) → `~/Downloads/Rach 2-Processed/` (29) →
+  combine → `~/Downloads/Rach 2-Combined/` (13 books,
+  `NN. Rach Symphony No. 2 • <Part>.pdf`).
+- **13-book grouping** (verified, page counts checked): Flute I/II/III · Oboe
+  I/II/III · Clarinet I/II + Bass Clarinet (folded in as "Clarinet III") ·
+  Bassoon I/II · Horn I–IV · Trumpet I/II/III · Low Brass = Trombone I/II + Bass
+  Trombone + Tuba · Timpani + Percussion · Violin I · Violin II · Viola · Cello ·
+  Bass.
+- Other works differ: Glinka `8.9375×12` **with**
+  `--starts-on-even-files "Glinka Violin I.pdf"`; Stravinsky `9.5×12.5` (no
+  even-start).
 
 ## Regression safety
 
@@ -231,8 +295,6 @@ the good ones.
 
 - **Interior developable-surface model** to correct binding *compression*
   (foreshortening) that the boundary Coons patch and rigid straightener leave.
-- **Per-system straightening decisions** so a single bowing end-of-system is
-  ironed flat without the page average hiding it.
 - **Finish generalizing the seam** if a music page ever shows a facing page in
   view *past* its own music edge (see the caveat above) — extend the fold seam to
   bound the music-page clip while still excluding the near-spine warp band.

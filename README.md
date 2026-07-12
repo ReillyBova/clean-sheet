@@ -51,7 +51,10 @@ Each page flows through (intermediate artifacts are written with `--debug`):
 5. **Straighten** *(opt-in)* — staff-guided vertical flattening → bar-line
    de-shear → per-system left-margin de-drift → crease-side right-margin squaring
    → page centering.
-6. **Assemble** — size to the physical page, pad for parity, write the PDF.
+6. **Assemble** — size to the physical page, pad for parity, embed each page as a
+   maximally-compressed grayscale PNG **losslessly** into the PDF (via `img2pdf`,
+   no re-encoding — bit-identical rasters, exact dimensions/DPI, ~30% smaller than
+   a re-deflated embed).
 
 ## Setup
 

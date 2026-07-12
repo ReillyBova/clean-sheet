@@ -2,4 +2,4 @@ opencv-python
 numpy
 pypdfium2
 Pillow
-reportlab
+img2pdf

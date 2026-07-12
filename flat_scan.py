@@ -18,7 +18,7 @@ Examples:
   python music_part_phone_scan.py input.pdf output.pdf --page-size 9x12 --resume --work-dir output_work
 
 Dependencies:
-  pip install opencv-python numpy pypdfium2 pillow reportlab
+  pip install opencv-python numpy pypdfium2 pillow img2pdf
 """
 from __future__ import annotations
 
@@ -40,8 +40,7 @@ import cv2
 import numpy as np
 import pypdfium2 as pdfium
 from PIL import Image
-from reportlab.lib.utils import ImageReader
-from reportlab.pdfgen import canvas
+import img2pdf
 
 import flatscan_dewarp
 import flatscan_seam
@@ -1005,17 +1004,23 @@ def clean_ink(rect_bgr: np.ndarray, mode: str = "soft-gray", threshold_bias: int
 def write_pdf_from_images(image_paths: list[Path], output_pdf: Path, page_size: PageSize, dpi: int) -> None:
     page_w_pt, page_h_pt = page_size.points()
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
-    c = canvas.Canvas(str(output_pdf), pagesize=(page_w_pt, page_h_pt))
-    for p in image_paths:
-        reader = ImageReader(str(p))
-        c.drawImage(reader, 0, 0, width=page_w_pt, height=page_h_pt, preserveAspectRatio=False, mask=None)
-        c.showPage()
-    c.save()
+    # img2pdf embeds each PNG's compressed stream verbatim (lossless, no
+    # re-encoding), so the pages stay bit-identical while the container avoids the
+    # ~40% bloat ReportLab added by decoding and re-deflating at a weak level. A
+    # fixed page size stretches every image to the exact physical dimensions,
+    # matching the previous preserveAspectRatio=False behaviour and preserving DPI.
+    layout = img2pdf.get_layout_fun((page_w_pt, page_h_pt))
+    with open(output_pdf, "wb") as f:
+        f.write(img2pdf.convert([str(p) for p in image_paths], layout_fun=layout))
 
 
 def save_output_image(img: np.ndarray, out_path: Path) -> None:
-    # PNG grayscale is ideal for exact pixel output. ReportLab embeds it into the final PDF page.
-    imwrite(out_path, img)
+    # PNG grayscale is ideal for exact pixel output; img2pdf embeds the compressed
+    # stream verbatim, so max PNG compression here directly shrinks the final PDF.
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    ok = cv2.imwrite(str(out_path), img, [int(cv2.IMWRITE_PNG_COMPRESSION), 9])
+    if not ok:
+        raise RuntimeError(f"Could not write image: {out_path}")
 
 
 def make_blank_page(out_w: int, out_h: int, mode: str) -> np.ndarray:
