@@ -77,9 +77,9 @@ code {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: var(--muted-2);
+  color: #f0b32e;
   font-size: 0.9rem;
-  font-weight: 500;
+  font-weight: 600;
 }
 .brand-solstice { display: inline-flex; align-items: center; opacity: 0.9; transition: opacity 0.2s ease; }
 .brand-solstice:hover { opacity: 1; }
@@ -358,7 +358,8 @@ code {
   max-width: var(--maxw);
   margin: 40px auto 0;
   padding: 24px 28px 44px;
-  display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  display: flex; justify-content: center; flex-wrap: wrap; gap: 8px;
+  text-align: center;
   color: var(--muted-2, #6f6555);
   font-size: 0.85rem;
   border-top: 1px solid rgba(255,255,255,0.06);
