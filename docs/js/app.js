@@ -32,24 +32,33 @@ const els = {
   replayBtn: $("#replayBtn"),
 };
 
-const state = { g: 0, playing: true, phase: -1, cine: null, last: 0, holding: 0 };
+const state = { g: 0, playing: true, phase: -1, cine: null, last: 0, holding: 0,
+                playlist: [], idx: 0, switching: false };
 
 const loadImage = (src) => new Promise((res, rej) => {
   const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src;
 });
 
+const shuffle = (a) => {
+  const r = a.slice();
+  for (let i = r.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [r[i], r[j]] = [r[j], r[i]];
+  }
+  return r;
+};
+
 async function boot() {
   const demo = await fetch("assets/demo.json").then((r) => r.json());
-  const [photo, ink] = await Promise.all([
-    loadImage("assets/" + demo.photo.image),
-    loadImage("assets/stages/ink.jpg"),
-  ]);
+  // Support the legacy single-example shape as well as the {examples:[...]} list.
+  const examples = demo.examples || [demo];
+  state.playlist = shuffle(examples);
+  state.idx = 0;
 
   state.cine = new Cinematic(els.gl);
-  try { await state.cine.init(demo, photo, ink); } catch (e) { console.warn(e); }
-  els.gl.classList.add("show");
-
   buildTicks();
+  await loadExample(state.playlist[0]);
+  els.gl.classList.add("show");
   setPhase(0, true);
 
   window.addEventListener("resize", () => state.cine && state.cine.resize());
@@ -65,6 +74,32 @@ async function boot() {
 
   state.last = performance.now();
   requestAnimationFrame(tick);
+}
+
+// Load one example (its photo + ink) into the shared cinematic scene.
+async function loadExample(ex) {
+  state.switching = true;
+  try {
+    const [photo, ink] = await Promise.all([
+      loadImage("assets/" + ex.photo.image),
+      loadImage("assets/" + ex.ink),
+    ]);
+    await state.cine.init(ex, photo, ink);
+  } catch (e) { console.warn(e); }
+  state.g = 0; state.holding = 0; state.phase = -1;
+  render();
+  state.switching = false;
+}
+
+// Advance to the next example, reshuffling after a full pass so every example
+// is shown once before any repeats.
+function nextExample() {
+  state.idx += 1;
+  if (state.idx >= state.playlist.length) {
+    state.playlist = shuffle(state.playlist);
+    state.idx = 0;
+  }
+  loadExample(state.playlist[state.idx]);
 }
 
 function buildTicks() {
@@ -89,6 +124,7 @@ function setPhase(i, immediate = false) {
   if (i === state.phase) return;
   state.phase = i;
   const p = PHASES[i];
+  if (!p) return;
   els.readout.classList.add("swap");
   const apply = () => {
     els.title.textContent = p.title;
@@ -96,7 +132,7 @@ function setPhase(i, immediate = false) {
     els.readout.classList.remove("swap");
   };
   if (immediate) apply(); else setTimeout(apply, 160);
-  PHASES.forEach((ph, idx) => ph._tick.classList.toggle("passed", idx <= i));
+  PHASES.forEach((ph, idx) => ph._tick && ph._tick.classList.toggle("passed", idx <= i));
 }
 
 function render() {
@@ -108,11 +144,14 @@ function render() {
 function tick(ts) {
   const dt = Math.min(50, ts - state.last);
   state.last = ts;
-  if (state.playing) {
+  if (state.playing && !state.switching) {
     if (state.g >= 1 && state.holding < HOLD_MS) {
       state.holding += dt;
+    } else if (state.g >= 1) {
+      // Finished this example: move to the next one (reshuffles after a pass)
+      // rather than replaying the same page.
+      nextExample();
     } else {
-      if (state.g >= 1) { state.g = 0; state.holding = 0; }
       state.g = Math.min(1, state.g + dt / LOOP_MS);
       render();
     }

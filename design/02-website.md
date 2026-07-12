@@ -1,7 +1,7 @@
 # Website design (`docs/` — GitHub Pages demo)
 
-An interactive, cinematic walkthrough that animates the **real** pipeline on a
-sample page, served from `docs/` on `master` via GitHub Pages
+An interactive, cinematic walkthrough that animates the **real** pipeline on
+genuine captured pages, served from `docs/` on `master` via GitHub Pages
 (`reillybova.github.io/clean-sheet`). It is a *demo/marketing* surface, not the
 converter — it replays the stages visually so a viewer immediately understands
 what the tool does.
@@ -31,6 +31,13 @@ docs/
 - **Single continuous shot.** Reworked from discrete steps to one continuous
   cinematic so the transformation reads as a single fluid transformation rather
   than a slideshow.
+- **A cycling playlist of real pages.** `demo.json` carries several examples
+  (`{examples:[...]}`), each a real capture with its own photo, final ink, and
+  Coons UV grid — including hard binding-fold *booklet* captures. On load the
+  playlist is shuffled and, when a shot finishes, it advances to the next example
+  (reshuffling after a full pass) so every page is shown before any repeats. The
+  single WebGL renderer is reused; only the scene/textures are rebuilt per switch
+  (`Cinematic.init` is re-callable and disposes the previous scene).
 - **Animate on the real plate.** The 3D plane is textured with the actual sample
   page and the overlay effects are driven from the true geometry, so what you see
   is faithful to the pipeline.

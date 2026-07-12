@@ -200,15 +200,18 @@ Default is `soft-gray`, the recommended anti-aliased grayscale ink.
 The interactive walkthrough at
 **[reillybova.github.io/clean-sheet](https://reillybova.github.io/clean-sheet/)**
 is a static site served from `docs/` via GitHub Pages. It's a single continuous
-WebGL shot (three.js) that plays the real pipeline stages on one page — the mesh,
-UV grid, and un-warp are driven by actual Coons source coordinates exported from
-a live run.
+WebGL shot (three.js) that plays the real pipeline (find the sheet → map the
+warped surface with a UV grid → lift it flat → develop the clean soft-gray ink)
+on genuine captured pages — the mesh, UV grid, and un-warp are driven by actual
+Coons source coordinates exported from live runs. It cycles through several
+examples (including hard binding-fold booklet captures), shuffled and advanced on
+each completion so every page shows before any repeats.
 
 - `docs/` — the site (`index.html`, `css/`, `js/cinematic.js` scene + `js/app.js`
   controller, `assets/`).
 - `tools/build_demo_assets.py` — regenerates the demo images and
-  `docs/assets/demo.json` (the per-vertex source→flat UV grid) from a real
-  pipeline run:
+  `docs/assets/demo.json` (per-example photo, final ink, and per-vertex
+  source→flat UV grid) from real pipeline runs:
 
   ```bash
   python tools/build_demo_assets.py

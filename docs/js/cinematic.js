@@ -18,7 +18,23 @@ const GOLD = 0xe0a94a, GOLD_SOFT = 0xf0cd8a, AMBER = 0xf2a327;
 export class Cinematic {
   constructor(canvas) { this.canvas = canvas; this.ready = false; }
 
+  _disposeScene() {
+    this.ready = false;
+    if (this.photoTex) this.photoTex.dispose();
+    if (this.inkTex) this.inkTex.dispose();
+    if (this.scene) {
+      this.scene.traverse((o) => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) o.material.dispose();
+      });
+    }
+    this.scene = null;
+  }
+
   async init(demo, photoImg, inkImg) {
+    // Re-callable: switching examples disposes the previous scene/textures and
+    // rebuilds, while reusing the single WebGL renderer/canvas.
+    this._disposeScene();
     const GW = demo.grid.w, GH = demo.grid.h;
     const src = demo.grid.src;
     const W = demo.photo.w, H = demo.photo.h;
@@ -51,9 +67,11 @@ export class Cinematic {
     // --- scene / camera / renderer (y-down ortho) ---
     this.scene = new THREE.Scene();
     this.camera = new THREE.OrthographicCamera(0, 1, 0, aspect, -10, 10);
-    try {
-      this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, alpha: true, antialias: true });
-    } catch (e) { this.failed = true; return; }
+    if (!this.renderer) {
+      try {
+        this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, alpha: true, antialias: true });
+      } catch (e) { this.failed = true; return; }
+    }
     this.renderer.setClearColor(0x000000, 0);
 
     const mkTex = (img) => {
