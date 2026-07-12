@@ -75,7 +75,7 @@ async function boot() {
 
   state.cine = new Cinematic(els.gl);
   buildTicks();
-  buildReel(examples);
+  buildReel(state.playlist);
   await loadExample(state.playlist[0]);
   els.gl.classList.add("show");
   setPhase(0, true);
@@ -118,14 +118,11 @@ async function loadExample(ex) {
   state.switching = false;
 }
 
-// Advance to the next example, reshuffling after a full pass so every example
-// is shown once before any repeats.
+// Advance to the next example. The playlist order is fixed for the session
+// (Ruslan first, the rest shuffled once on load), so cycling is linear and
+// matches the reel's left-to-right order — it doesn't jump around.
 function nextExample() {
-  state.idx += 1;
-  if (state.idx >= state.playlist.length) {
-    state.playlist = makePlaylist(state.playlist);
-    state.idx = 0;
-  }
+  state.idx = (state.idx + 1) % state.playlist.length;
   loadExample(state.playlist[state.idx]);
 }
 
