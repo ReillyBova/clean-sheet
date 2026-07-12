@@ -161,13 +161,51 @@ def _smooth_disp_across_systems(disp_o: np.ndarray, scale: float = 4.0,
         return disp_o.copy()
     d = disp_o.copy()
     for _ in range(iters):
-        up = np.vstack([d[:1], d[:-1]])
-        dn = np.vstack([d[1:], d[-1:]])
+        # Linear (not flat) extrapolation past the stack ends: the virtual
+        # neighbour above the top / below the bottom continues the local trend
+        # (2*edge - inner). This makes a linear curl trend a fixed point at the
+        # boundary too -- otherwise edge replication treats the outermost systems
+        # (which carry the *largest* binding curl) as outliers and damps their
+        # correction, leaving the top/bottom tails bent.
+        up = np.vstack([2 * d[:1] - d[1:2], d[:-1]])
+        dn = np.vstack([d[1:], 2 * d[-1:] - d[-2:-1]])
         sm = 0.5 * (up + dn)
         resid = d - sm
         wkeep = 1.0 / (1.0 + (resid / scale) ** 2)   # ~1 consistent, ->0 outlier
         d = wkeep * d + (1.0 - wkeep) * sm
     return d
+
+
+def _traced_centers(gray: np.ndarray, w: int):
+    """Ridge-traced comb centre per system, interpolated to full width.
+
+    Returns ``[(ytop, ybot, center_full), ...]``. Unlike the block correlation,
+    the ridge trace keeps following each staff line into the binding tail (via
+    its raw-ink fallback) where the lines foreshorten, so it recovers the steep
+    end curl the correlation goes blind to. Used to extend the displacement into
+    that unreliable tail (see compute_displacement)."""
+    xcs_tr, sys_lines, _ = _trace_staff_lines(gray)
+    out = []
+    xs_all = np.arange(w)
+    for (ytop, ybot, L) in sys_lines:
+        center = np.nanmedian(L, axis=0)
+        good = ~np.isnan(center)
+        if good.sum() < 4:
+            continue
+        cf = np.interp(xs_all, xcs_tr[good], center[good],
+                       left=center[good][0], right=center[good][-1]).astype(np.float32)
+        out.append((float(ytop), float(ybot), cf))
+    return out
+
+
+def _match_center(centers, ytop, ybot):
+    """Pick the ridge-traced centre whose band best overlaps [ytop, ybot]."""
+    best, best_ov = None, 0.0
+    for (t, b, cf) in centers:
+        ov = max(0.0, min(ybot, b) - max(ytop, t))
+        if ov > best_ov:
+            best_ov, best = ov, cf
+    return best
 
 
 def compute_displacement(gray: np.ndarray):
@@ -207,24 +245,55 @@ def compute_displacement(gray: np.ndarray):
 
     step_shift = max(3, int(space * 0.6))
     cmid = len(xcs) // 2
+    xcs_a = np.array(xcs, np.float32)
+    centers = _traced_centers(gray, w)          # ridge-traced curl for tail extension
+    tail_lim = space * 4.0                       # cap on how far the tail may be lifted
     sys_curves: list[tuple[int, int, np.ndarray, np.ndarray]] = []
     for (ytop, ybot) in systems:
         profs = [_profile(horiz[:, max(0, xc - block // 2): xc + block // 2], ytop, ybot) for xc in xcs]
         offs = np.zeros(len(xcs), np.float32)
+        vals = np.zeros(len(xcs), np.float32)
+        vals[cmid] = 1.0
         acc = 0.0
         for i in range(cmid + 1, len(xcs)):
             s, val = _shift_by_corr(profs[i], profs[i - 1], step_shift)
             acc += s if val > 0.5 else 0.0
-            offs[i] = acc
+            offs[i] = acc; vals[i] = val
         acc = 0.0
         for i in range(cmid - 1, -1, -1):
             s, val = _shift_by_corr(profs[i], profs[i + 1], step_shift)
             acc += s if val > 0.5 else 0.0
-            offs[i] = acc
+            offs[i] = acc; vals[i] = val
+        # Extend into the binding tail: where the correlation loses confidence
+        # (val<=0.5) it freezes the displacement flat and under-corrects the steep
+        # end curl. The ridge trace still follows that curl, so past the last
+        # confident sample on each side we continue the displacement along the
+        # traced comb centre (bounded), recovering the end bend.
+        rb = cmid
+        while rb + 1 < len(xcs) and vals[rb + 1] > 0.5:
+            rb += 1
+        lb = cmid
+        while lb - 1 >= 0 and vals[lb - 1] > 0.5:
+            lb -= 1
+        cen = _match_center(centers, ytop, ybot)
+        if cen is not None:
+            if rb < len(xcs) - 1:
+                base = offs[rb]; cb = cen[int(xcs_a[rb])]
+                for i in range(rb + 1, len(xcs)):
+                    d = float(cen[int(xcs_a[i])] - cb)
+                    offs[i] = base + float(np.clip(d, -tail_lim, tail_lim))
+            if lb > 0:
+                base = offs[lb]; cb = cen[int(xcs_a[lb])]
+                for i in range(lb - 1, -1, -1):
+                    d = float(cen[int(xcs_a[i])] - cb)
+                    offs[i] = base + float(np.clip(d, -tail_lim, tail_lim))
         k = 5  # light moving-average: kill jitter, keep the wave shape
         pad = np.pad(offs, k // 2, mode="edge")
         offs_s = np.convolve(pad, np.ones(k) / k, mode="valid")
-        disp = offs_s - offs_s.mean()  # flatten to the system's mean height
+        # flatten to the mean over the confidently-measured span (so extending the
+        # tail cannot shift the reliable body's correction)
+        ref = offs_s[lb:rb + 1].mean() if rb >= lb else offs_s.mean()
+        disp = offs_s - ref
         sys_curves.append((ytop, ybot, np.array(xcs, np.float32), disp.astype(np.float32)))
 
     if len(sys_curves) < 2:
@@ -290,6 +359,96 @@ def _seed_line_rows(prof: np.ndarray, space: int) -> list[int]:
     return peaks
 
 
+def _snap_comb(seeds: np.ndarray, strengths: np.ndarray | None = None) -> np.ndarray:
+    """Trim seed peaks down to a uniformly-spaced staff comb.
+
+    Staff lines are equally spaced and, sampled at the page centre, uniformly
+    dark, so a peak that sits at an anomalous gap from the comb *or* is markedly
+    fainter than its siblings (e.g. a slur, tie, ledger line or text baseline
+    caught just above or below the staff) is not a real line -- it would
+    otherwise make the coupled tracer maintain a phantom "6-line staff". We
+    estimate the true line pitch from the *interior* gaps (robust to a bad
+    endpoint) and peel off any end line whose gap to its neighbour departs from
+    that pitch or whose ink is far weaker than the comb's, since the spurious
+    catch is essentially always at the top or bottom edge of the comb. Interior
+    gaps are never touched, so a genuinely missed faint line is preserved rather
+    than mistaken for a merge."""
+    seeds = np.asarray(seeds, np.float32)
+    strengths = None if strengths is None else np.asarray(strengths, np.float32)
+    while len(seeds) > 3:
+        gaps = np.diff(seeds)
+        interior = gaps[1:-1] if len(gaps) > 2 else gaps
+        s = float(np.median(interior))
+        if s <= 0:
+            break
+        r0, r1 = gaps[0] / s, gaps[-1] / s
+        lo, hi = 0.72, 1.35   # a real comb step is ~1.0; outside => not a staff line
+        c0 = r0 < lo or r0 > hi
+        c1 = r1 < lo or r1 > hi
+        # An endpoint far fainter than the comb body is a phantom even when its
+        # spacing looks plausible (a light tie/ledger sitting near the pitch).
+        w0 = w1 = 0.0
+        if strengths is not None and len(strengths) == len(seeds):
+            body = float(np.median(strengths[1:-1])) if len(strengths) > 2 else float(np.median(strengths))
+            if body > 0:
+                if strengths[0] < 0.55 * body:
+                    c0 = True; w0 = 1.0 - strengths[0] / body
+                if strengths[-1] < 0.55 * body:
+                    c1 = True; w1 = 1.0 - strengths[-1] / body
+        if not (c0 or c1):
+            break
+        sev0 = abs(np.log(r0)) + w0 if c0 else -1.0
+        sev1 = abs(np.log(r1)) + w1 if c1 else -1.0
+        if sev0 >= sev1:
+            seeds = seeds[1:]
+            if strengths is not None and len(strengths) == len(seeds) + 1:
+                strengths = strengths[1:]
+        else:
+            seeds = seeds[:-1]
+            if strengths is not None and len(strengths) == len(seeds) + 1:
+                strengths = strengths[:-1]
+    return seeds
+
+
+def _staff_hextent(horiz: np.ndarray, raw: np.ndarray, xcs: np.ndarray,
+                   L: np.ndarray, ytop: int, ybot: int):
+    """Sampled-column indices ``(jL, jR)`` bounding the real staff horizontally.
+
+    A traced comb is only meaningful between where the staff actually starts
+    (first inked columns, after the left margin) and where it ends (the final
+    barline on the binding side). Past those the trace merely coasts on its slope
+    into the blank margin and fans out. We bound it so the correction can be held
+    flat outside the staff rather than bending the margin.
+
+    Left edge: the first sampled column where nearly the whole comb carries
+    emphasized (staff-line) ink. Right edge: the rightmost near-full-height
+    vertical in the band -- the final barline -- which anchors the true end even
+    where the binding fade has killed the horizontal emphasis; we fall back to the
+    last inked column when no clear barline is present."""
+    n = L.shape[0]
+    H = horiz.shape[0]
+    cov = np.zeros(len(xcs))
+    for j, xc in enumerate(xcs):
+        cnt = 0
+        for ki in range(n):
+            y = int(L[ki, j])
+            if 0 <= y < H and horiz[max(0, y - 2):y + 3, xc].any():
+                cnt += 1
+        cov[j] = cnt
+    inked = np.where(cov >= n - 1)[0]
+    if len(inked) == 0:
+        return 0, len(xcs) - 1
+    jL, jR = int(inked[0]), int(inked[-1])
+    band_h = ybot - ytop
+    yb0, yb1 = max(0, ytop), min(raw.shape[0], ybot)
+    colsum = raw[yb0:yb1].sum(0)                      # inked rows per column
+    bar = np.where(colsum > 0.55 * band_h)[0]         # full-height verticals = barlines
+    if len(bar):
+        jbar = int(np.argmin(np.abs(xcs - bar[-1])))
+        jR = max(jR, jbar)                            # extend to the final barline
+    return jL, jR
+
+
 def _trace_staff_lines(gray: np.ndarray):
     """Trace every staff line of every system across the full page width.
 
@@ -320,44 +479,152 @@ def _trace_staff_lines(gray: np.ndarray):
     # so the trace keeps following the real (sloped) line to the page edge.
     raw = (bw > 0).astype(np.uint8)
     win = max(3, int(round(space * 0.45)))
+    slope_cap = 0.5  # px of vertical move per px of x -- bounds runaway extrapolation
 
-    def step(prev: float, xc: int) -> float:
-        lo = max(0, int(prev - win)); hi = int(prev + win)
-        seg = np.where(horiz[lo:hi, xc] > 0)[0]
-        if len(seg):
-            return lo + float(np.median(seg))
-        seg = np.where(raw[lo:hi, xc] > 0)[0]
-        if len(seg):
-            # pick the raw ink nearest the predicted line (robust to a note head
-            # or ledger line sitting elsewhere inside the window)
-            ys = lo + seg
-            return float(ys[int(np.argmin(np.abs(ys - prev)))])
-        return prev
+    def _measure(pred: np.ndarray, xc: int):
+        """Locate ink near each line's predicted y at column ``xc``.
+
+        Returns ``(ys, found)`` where ``ys[k]`` is the observed y of line ``k``
+        (NaN where blind). Emphasized (horizontally-extended) ink is preferred;
+        raw ink nearest the prediction is the fallback where the binding fade
+        kills the emphasis. Note that both signals happily latch onto a tie,
+        slur or the terminal barline that happens to pass through the search
+        window -- rejecting those is the job of the coupled comb fit below, not
+        this per-line probe."""
+        ys = np.full(pred.shape[0], np.nan, np.float32)
+        for k in range(pred.shape[0]):
+            pk = float(pred[k])
+            lo = max(0, int(pk - win)); hi = int(pk + win)
+            seg = np.where(horiz[lo:hi, xc] > 0)[0]
+            if len(seg):
+                ys[k] = lo + float(np.median(seg))
+            else:
+                seg = np.where(raw[lo:hi, xc] > 0)[0]
+                if len(seg):
+                    yy = lo + seg
+                    ys[k] = float(yy[int(np.argmin(np.abs(yy - pk)))])
+        return ys, ~np.isnan(ys)
 
     out = []
+    extents = []
     for (ytop, ybot) in systems:
         cx0, cx1 = int(w * 0.40), int(w * 0.60)
         prof = horiz[ytop:ybot, cx0:cx1].sum(1).astype(np.float32)
         if prof.max() <= 0:
             continue
-        seeds = [ytop + p for p in _seed_line_rows(prof, space)]
+        rows = sorted(_seed_line_rows(prof, space))
+        seeds = np.array([ytop + r for r in rows], np.float32)
         if len(seeds) < 3:
             continue
+        seeds = _snap_comb(seeds, np.array([prof[r] for r in rows], np.float32))
+        n = len(seeds)
+        # Fixed relative geometry of the staff: the lines translate and slowly
+        # scale together, they never re-order or change their *relative* spacing
+        # abruptly. offset encodes the seed layout (so a grand staff's wide inner
+        # gap is preserved), scale is the per-column spacing multiplier.
+        offset = seeds - seeds.mean()
+        oo = float((offset * offset).sum())
+        lam = 4.0 * oo          # stiff ridge: spacing may drift only slowly
+        tol = 0.4 * space       # residual beyond this => line jumped off the comb
         seedx = (cx0 + cx1) // 2
         ci = int(np.argmin(np.abs(xcs - seedx)))
-        L = np.full((len(seeds), len(xcs)), np.nan, np.float32)
-        for ki, p in enumerate(seeds):
-            prev = float(p); L[ki, ci] = p
-            for j in range(ci + 1, len(xcs)):
-                prev = step(prev, xcs[j]); L[ki, j] = prev
-            prev = float(p)
-            for j in range(ci - 1, -1, -1):
-                prev = step(prev, xcs[j]); L[ki, j] = prev
-        L = np.sort(L, axis=0)  # forbid crossings
+        L = np.full((n, len(xcs)), np.nan, np.float32)
+        L[:, ci] = seeds
+
+        def _comb_fit(ys, found, c0, s0):
+            """Robustly fit (center, scale) to the found line observations under
+            ``y_k ~= center + scale*offset_k``, with a stiff ridge holding scale
+            near ``s0``. Two IRLS passes reject the tie/note/barline outliers
+            (large residual => tiny weight). Returns (center, scale)."""
+            c, s = c0, s0
+            for _ in range(2):
+                r = ys - (c + s * offset)
+                wg = np.where(found, 1.0 / (1.0 + (r / tol) ** 2), 0.0)
+                if wg.sum() < 1e-6:
+                    return c, s
+                Sw = wg.sum()
+                Swo = float((wg * offset).sum())
+                Swy = float((wg * np.nan_to_num(ys)).sum())
+                Swoo = float((wg * offset * offset).sum())
+                Swoy = float((wg * offset * np.nan_to_num(ys)).sum())
+                den = (Swoo - Swo * Swo / Sw) + lam
+                s = (Swoy - Swo * Swy / Sw + lam * s0) / den if abs(den) > 1e-9 else s0
+                s = float(np.clip(s, 0.6, 1.6))
+                c = (Swy - s * Swo) / Sw
+            return c, s
+
+        def _sweep(idxs, center, scale, cslope):
+            blind = 0
+            prev_x = xcs[ci]
+            for j in idxs:
+                dx = float(xcs[j] - prev_x); prev_x = xcs[j]
+                pred_c = center + cslope * dx
+                pred = pred_c + scale * offset
+                ys, found = _measure(pred, int(xcs[j]))
+                if found.sum() >= 2:
+                    c, s = _comb_fit(ys, found, pred_c, scale)
+                    cslope = float(np.clip(0.5 * cslope + 0.5 * (c - center) / max(abs(dx), 1e-6),
+                                           -slope_cap, slope_cap))
+                    center = c
+                    scale = 0.85 * scale + 0.15 * s   # spacing eases, never jumps
+                    blind = 0
+                else:
+                    center = pred_c                    # blind: coast the comb
+                    blind += 1
+                    if blind > 6:
+                        cslope *= 0.7
+                L[:, j] = center + scale * offset
+
+        _sweep(range(ci + 1, len(xcs)), float(seeds.mean()), 1.0, 0.0)
+        _sweep(range(ci - 1, -1, -1), float(seeds.mean()), 1.0, 0.0)
+
         k = 7  # light along-x smoothing kills jitter, keeps the real bend
         for ki in range(L.shape[0]):
             L[ki] = np.convolve(np.pad(L[ki], k // 2, mode="edge"), np.ones(k) / k, mode="valid")
+        jL, jR = _staff_hextent(horiz, raw, xcs, L, ytop, ybot)
         out.append((ytop, ybot, L))
+        extents.append((jL, jR))
+
+    # Truncate at the staff's real horizontal extent so the trace cannot fan into
+    # the blank margin past the first/last barline and drag the warp with it. The
+    # page block is one continuous surface: every system starts and ends at the
+    # same binding x, so we share a single robust extent across systems rather
+    # than each system's own. This rescues the outermost systems, whose own
+    # final-barline is itself curled/short and under-detects -- clamping them
+    # individually would cut away the worst of the curl and leave it uncorrected.
+    #
+    # Past the extent we do NOT freeze the comb flat (that leaves the binding
+    # gutter's curl uncorrected -- a visible hook at the very edge). The staff
+    # rules on into the gutter but curls too steeply for the trace to follow
+    # reliably, so instead we *extrapolate* the comb along the curl's own slope,
+    # measured from a reliable window just inside the extent. The gutter is
+    # effectively blank past the final barline, so continuing the established
+    # smooth curvature straightens those ruled ends without trusting a fanning
+    # trace. Slope is bounded and the lines keep their relative spacing (a single
+    # comb slope), so extrapolation can never fan or fold.
+    if extents:
+        jL = int(np.median([e[0] for e in extents]))
+        jR = int(np.median([e[1] for e in extents]))
+        win = max(2, int(round(space * 8 / 6)))   # ~8 staff-spaces of columns
+        for (_yt, _yb, L) in out:
+            if jR > jL:
+                center = L.mean(axis=0)
+                # right slope from [jR-win, jR]; least-squares over the window
+                a = max(jL, jR - win)
+                if jR > a:
+                    xr = xcs[a:jR + 1].astype(np.float64)
+                    sl = np.polyfit(xr, center[a:jR + 1], 1)[0]
+                    sl = float(np.clip(sl, -0.5, 0.5))
+                    for j in range(jR + 1, len(xcs)):
+                        L[:, j] = L[:, jR] + sl * (xcs[j] - xcs[jR])
+                # left slope from [jL, jL+win]
+                b = min(jR, jL + win)
+                if b > jL:
+                    xl = xcs[jL:b + 1].astype(np.float64)
+                    sl = np.polyfit(xl, center[jL:b + 1], 1)[0]
+                    sl = float(np.clip(sl, -0.5, 0.5))
+                    for j in range(0, jL):
+                        L[:, j] = L[:, jL] + sl * (xcs[j] - xcs[jL])
     return xcs, out, space
 
 
@@ -411,14 +678,13 @@ def _staff_guided_displacement(gray: np.ndarray, max_disp_factor: float = 8.0):
     offsets = [offsets[i] for i in order]
     S = len(tops)
 
-    # Enforce vertical continuity: pull any system's binding-side offset that
-    # disagrees with the staves above/below onto their smooth trend, then
-    # re-flatten. Prevents the under-corrected/divergent ends that scrunch the
-    # inter-system gap (see _smooth_disp_across_systems).
-    if S >= 3:
-        disp_o = _smooth_disp_across_systems(np.array(offsets, np.float32))
-        disp_o = disp_o - disp_o.mean(axis=1, keepdims=True)
-        offsets = [disp_o[i] for i in range(S)]
+    # No cross-system smoothing: with the coupled-comb trace (constant spacing)
+    # and a shared page extent, each system now flattens to ~1-2px on its own,
+    # and the shared extent already keeps the systems mutually consistent at the
+    # binding. Relaxing offsets toward neighbours here only fought that reliable
+    # per-system fit -- it *raised* the median residual several-fold -- so the
+    # continuity is now enforced by geometry (shared extent) rather than by
+    # blurring the warp field across systems.
 
     # Control points at each band's edges (strictly increasing y); the per-column
     # offset is constant across a band and blends linearly through the gaps.
@@ -453,35 +719,28 @@ def _staff_guided_displacement(gray: np.ndarray, max_disp_factor: float = 8.0):
 
 
 def _staff_flatness(gray: np.ndarray) -> float:
-    """Median per-system staff-line waviness (peak-to-peak px) across the width.
+    """Median per-system comb-centre waviness (peak-to-peak px) across the staff.
 
     Lower is flatter. Used to pick the better of the guided and rigid warps so a
     page can never be made worse: whichever remaps to flatter staff lines wins.
-    """
-    h, w = gray.shape
-    bw = (gray < 150).astype(np.uint8) * 255
-    thickness, space = _staff_metrics(bw)
-    emph = _emphasize(bw, thickness)
-    systems = _find_systems(emph, space)
-    horiz = (emph > 0).astype(np.uint8)
+
+    Measured off the coupled-comb trace (the same reliable estimator the guided
+    warp uses), not an independent re-seed of a single line: the old metric
+    tracked only the emphasized *first* line, which is exactly the signal that
+    breaks down at the binding, so it under-credited a warp that had genuinely
+    ironed the tail flat. The trace is horizontally truncated to the real staff
+    extent (held flat in the margins), so the peak-to-peak reflects only the
+    staff itself and includes the binding endpoints honestly. A robust 2..98
+    percentile span rejects a single mistraced column."""
+    xcs, sys_lines, _ = _trace_staff_lines(gray)
     devs = []
-    for (ytop, ybot) in systems:
-        band = horiz[ytop:ybot]
-        rp = band.sum(1).astype(np.float32)
-        if rp.max() <= 0:
+    for (_ytop, _ybot, L) in sys_lines:
+        center = np.nanmean(L, axis=0)
+        good = center[~np.isnan(center)]
+        if len(good) < 8:
             continue
-        lr = np.where(rp > rp.max() * 0.4)[0]
-        if len(lr) < 3:
-            continue
-        yl = ytop + int(lr[0])
-        ys = []
-        for xc in range(int(w * 0.06), int(w * 0.985), 8):
-            seg = horiz[max(0, yl - space):yl + space, xc]
-            r = np.where(seg > 0)[0]
-            if len(r):
-                ys.append(max(0, yl - space) + int(np.median(r)))
-        if len(ys) >= 8:
-            devs.append(max(ys) - min(ys))
+        lo, hi = np.percentile(good, [2, 98])
+        devs.append(float(hi - lo))
     return float(np.median(devs)) if devs else float("inf")
 
 
@@ -504,7 +763,20 @@ def straighten_staves(gray: np.ndarray, max_disp_factor: float = 6.0,
     if guided is not None:
         guided_out = cv2.remap(gray, guided[0], guided[1], cv2.INTER_CUBIC,
                                borderMode=cv2.BORDER_REPLICATE)
+        # Refinement pass: the first warp flattens the bulk, but a little residual
+        # survives wherever the trace lagged the steepest binding curl. Re-tracing
+        # the now near-flat page measures only that small leftover error (on an
+        # easy, mostly-straight line) and irons it out. Kept only if it actually
+        # helps, so a already-perfect page is never disturbed.
         gflat = _staff_flatness(guided_out)
+        r_guided, rginfo = _staff_guided_displacement(guided_out)
+        if r_guided is not None:
+            refined = cv2.remap(guided_out, r_guided[0], r_guided[1],
+                                cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+            rflat = _staff_flatness(refined)
+            if rflat + 0.05 < gflat:
+                guided_out, gflat = refined, rflat
+                ginfo["passes"] = 2
         ginfo["flatness"] = gflat
         ginfo["method"] = "guided"
         if gflat <= _GUIDED_ACCEPT_PX:

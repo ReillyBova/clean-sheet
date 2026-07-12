@@ -116,11 +116,17 @@ How it works (in `flatscan_dewarp.py`, applied after ink cleanup):
 
 1. Estimate staff-line thickness and spacing from vertical run-length histograms.
 2. Detect staff *systems* (the 5-line combs) via horizontal-ink projection.
-3. **Flatten** each system: trace its staff lines and iron the whole comb flat
+3. **Flatten** each system: trace its staff lines as a single *coupled comb*
+   — all five lines share one centre curve and one slowly-varying spacing, so a
+   line that jumps onto a tie, note, or bar line becomes a spacing outlier and is
+   overridden by the group instead of dragging the warp. Iron the whole comb flat
    with a per-column rigid shift (staff spacing preserved — lines can never be
-   thickened or merged). A robust rigid fallback runs when the trace is unclear,
-   and whichever leaves the staves flatter is kept — so a page is never made
-   worse.
+   thickened or merged). The correction is truncated to the staves' shared
+   horizontal extent and its slope is extrapolated across the binding gutter, so
+   the curl is ironed all the way to the edge without a frozen hook. A robust
+   rigid fallback runs when the trace is unclear, and whichever leaves the staves
+   flatter — measured off the same comb trace, with an optional second refinement
+   pass — is kept, so a page is never made worse.
 4. **De-shear** so bar lines/stems read vertical; **de-drift** each system's left
    margin; **square** the crease-side right margin; **center** the music block —
    all margin-seam-aware so a binding shadow is never mistaken for content.
