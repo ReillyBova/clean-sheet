@@ -97,8 +97,17 @@ def build_example(eid, label, pdf, page1, booklet, dims):
     web_write(os.path.join(STAGES, eid, "rect.jpg"), rect)
     web_write(os.path.join(STAGES, eid, "ink.jpg"), final_clean)
 
-    # reprojection morph grid: source (photo) positions per mesh vertex, 0..1
-    mx, my = fs.coons_maps(edges, GRID_W, GRID_H)
+    # reprojection morph grid: source (photo) positions per mesh vertex, 0..1.
+    # Built from the TRUE (non-inset) page boundary so the webapp's "find the
+    # page" outline sits flush with the paper edge. rectify_boundary_coons above
+    # applies a 0.5% inward inset to its `edges`, but that inset exists only to
+    # keep the dark edge sliver out of the cleaned RASTER (rect/ink) -- the
+    # display mesh should trace the real edge, not the shrunken sampling quad.
+    contour = fs.largest_external_contour(mask)
+    corners = fs.find_corners_from_contour(contour)
+    edges_disp = fs.orient_edges(fs.split_into_edges(contour, corners), corners,
+                                 n=1200, smooth=0.045)
+    mx, my = fs.coons_maps(edges_disp, GRID_W, GRID_H)
     src = np.stack([mx / (W - 1), my / (H - 1)], axis=-1)
 
     # staff geometry (for the "find the staves" overlay and its ironing) + the
