@@ -14,6 +14,9 @@ const sstep = (a, b, x) => {
 const lerp = (a, b, t) => a + (b - a) * t;
 
 const GOLD = 0xe0a94a, GOLD_SOFT = 0xf0cd8a, AMBER = 0xf2a327;
+// UV mesh reads over the cream page, so it needs to go *darker* (not brighter) to
+// stay legible; a deep bronze keeps the warm palette while contrasting on paper.
+const GRID = 0x7a4e12;
 
 export class Cinematic {
   constructor(canvas) { this.canvas = canvas; this.ready = false; }
@@ -189,7 +192,7 @@ export class Cinematic {
     for (const [a, b] of segs) this.gridPairs.push(a, b);
     this.gridGeo = new THREE.BufferGeometry();
     this.gridGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(this.gridPairs.length * 3), 3));
-    this.gridMat = new THREE.LineBasicMaterial({ color: AMBER, transparent: true, opacity: 0 });
+    this.gridMat = new THREE.LineBasicMaterial({ color: GRID, transparent: true, opacity: 0 });
     this.grid = new THREE.LineSegments(this.gridGeo, this.gridMat);
     this.grid.position.z = 0.025;
     this.scene.add(this.grid);

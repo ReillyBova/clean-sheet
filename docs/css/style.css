@@ -144,6 +144,26 @@ code {
 .viewport .frame.show { opacity: 1; }
 .viewport .gl { opacity: 0; transition: opacity 0.35s ease; z-index: 5; }
 .viewport .gl.show { opacity: 1; }
+.viewport .loading {
+  position: absolute; inset: 0; z-index: 8;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 15px;
+  background: radial-gradient(120% 90% at 50% 40%, #241b13 0%, #0d0a07 78%);
+  transition: opacity 0.5s ease;
+}
+.viewport .loading.hide { opacity: 0; pointer-events: none; }
+.spinner {
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 2.5px solid rgba(224,169,74,0.18);
+  border-top-color: var(--gold);
+  animation: spin 0.9s linear infinite;
+}
+.loading-label {
+  font-family: "Fraunces", serif; font-size: 0.92rem; letter-spacing: 0.01em;
+  color: var(--muted);
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.2s; } }
 .scrim {
   position: absolute; inset: 0; z-index: 6; pointer-events: none;
   background: linear-gradient(180deg, rgba(0,0,0,0.18) 0%, transparent 22%, transparent 78%, rgba(0,0,0,0.28) 100%);

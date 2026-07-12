@@ -21,6 +21,7 @@ const els = {
   showcase: $("#showcase"),
   viewport: $("#viewport"),
   gl: $("#gl"),
+  loading: $("#loading"),
   title: $("#stageTitle"),
   blurb: $("#stageBlurb"),
   readout: $(".readout"),
@@ -33,7 +34,7 @@ const els = {
 };
 
 const state = { g: 0, playing: true, phase: -1, cine: null, last: 0, holding: 0,
-                playlist: [], idx: 0, switching: false };
+                playlist: [], idx: 0, switching: false, ready: false };
 
 const loadImage = (src) => new Promise((res, rej) => {
   const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src;
@@ -54,12 +55,25 @@ async function boot() {
   const examples = demo.examples || [demo];
   state.playlist = shuffle(examples);
   state.idx = 0;
+  // Optional ?ex=<id> pins a specific example first (sharing / testing).
+  const q0 = new URLSearchParams(location.search);
+  if (q0.has("ex")) {
+    const i = state.playlist.findIndex((e) => e.id === q0.get("ex"));
+    if (i > 0) { const [e] = state.playlist.splice(i, 1); state.playlist.unshift(e); }
+  }
 
   state.cine = new Cinematic(els.gl);
   buildTicks();
   await loadExample(state.playlist[0]);
   els.gl.classList.add("show");
   setPhase(0, true);
+  // Reveal only once the first frame is actually painted, so the clock never
+  // advances over a blank/loading viewport.
+  requestAnimationFrame(() => {
+    els.loading.classList.add("hide");
+    state.ready = true;
+    state.last = performance.now();
+  });
 
   window.addEventListener("resize", () => state.cine && state.cine.resize());
   els.playBtn.addEventListener("click", () => setPlaying(!state.playing));
@@ -72,7 +86,6 @@ async function boot() {
   const q = new URLSearchParams(location.search);
   if (q.has("g")) { seek(+q.get("g")); setPlaying(q.get("play") === "1"); }
 
-  state.last = performance.now();
   requestAnimationFrame(tick);
 }
 
@@ -144,7 +157,7 @@ function render() {
 function tick(ts) {
   const dt = Math.min(50, ts - state.last);
   state.last = ts;
-  if (state.playing && !state.switching) {
+  if (state.ready && state.playing && !state.switching) {
     if (state.g >= 1 && state.holding < HOLD_MS) {
       state.holding += dt;
     } else if (state.g >= 1) {
