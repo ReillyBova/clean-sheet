@@ -410,6 +410,46 @@ def _snap_comb(seeds: np.ndarray, strengths: np.ndarray | None = None) -> np.nda
     return seeds
 
 
+def _fit_uniform_comb(prof: np.ndarray, space: int, thickness: int) -> list[int] | None:
+    """Lock a rigid five-line staff comb onto a vertical ink profile.
+
+    An orchestral staff has exactly five equally-spaced lines, so counting raw
+    profile peaks is the wrong tool: a faint line is missed (four "lines") or a
+    slur/tie/ledger is caught (six), and either wrong count corrupts the comb's
+    relative geometry and kinks the warp. The staff pitch is already known
+    robustly (``space + thickness``), so we simply slide a rigid five-tooth comb
+    of that pitch over the profile in phase and keep the placement that lands the
+    most ink on all five teeth, requiring at least four of five to sit on real
+    ink. The fifth (possibly faint) line is then placed by the comb's own
+    uniformity rather than trusted to peak detection. Returns five row indices,
+    or ``None`` when no confident five-line fit exists so genuine one/two-line
+    percussion staves fall back to peak seeding."""
+    prof = np.asarray(prof, np.float32)
+    m = float(prof.max())
+    n = len(prof)
+    pitch = float(space + thickness)
+    span = 4.0 * pitch
+    if m <= 0 or span >= n:
+        return None
+    thr = 0.30 * m
+    win = max(1, thickness // 2 + 1)
+    best = None
+    y0 = 0.0
+    while y0 <= n - 1 - span:
+        pos = y0 + pitch * np.arange(5)
+        yi = np.round(pos).astype(int)
+        v = np.array([float(prof[max(0, yy - win):min(n, yy + win + 1)].max())
+                      for yy in yi], np.float32)
+        if int((v > thr).sum()) >= 4:
+            tot = float(v.sum())
+            if best is None or tot > best[0]:
+                best = (tot, pos.copy())
+        y0 += 1.0
+    if best is None:
+        return None
+    return [int(round(y)) for y in best[1]]
+
+
 def _staff_hextent(horiz: np.ndarray, raw: np.ndarray, xcs: np.ndarray,
                    L: np.ndarray, ytop: int, ybot: int):
     """Sampled-column indices ``(jL, jR)`` bounding the real staff horizontally.
@@ -513,10 +553,17 @@ def _trace_staff_lines(gray: np.ndarray):
         if prof.max() <= 0:
             continue
         rows = sorted(_seed_line_rows(prof, space))
-        seeds = np.array([ytop + r for r in rows], np.float32)
-        if len(seeds) < 3:
-            continue
-        seeds = _snap_comb(seeds, np.array([prof[r] for r in rows], np.float32))
+        comb5 = _fit_uniform_comb(prof, space, thickness)
+        if comb5 is not None:
+            # A confident five-line lock overrides raw peak counts (which miss a
+            # faint line or catch a slur/ledger and kink the warp); otherwise keep
+            # the peak seeding so genuine short percussion staves still trace.
+            seeds = np.array([ytop + r for r in comb5], np.float32)
+        else:
+            seeds = np.array([ytop + r for r in rows], np.float32)
+            if len(seeds) < 3:
+                continue
+            seeds = _snap_comb(seeds, np.array([prof[r] for r in rows], np.float32))
         n = len(seeds)
         # Fixed relative geometry of the staff: the lines translate and slowly
         # scale together, they never re-order or change their *relative* spacing
@@ -553,9 +600,9 @@ def _trace_staff_lines(gray: np.ndarray):
                 c = (Swy - s * Swo) / Sw
             return c, s
 
-        def _sweep(idxs, center, scale, cslope):
+        def _sweep(idxs, center, scale, cslope, start_j):
             blind = 0
-            prev_x = xcs[ci]
+            prev_x = xcs[start_j]
             for j in idxs:
                 dx = float(xcs[j] - prev_x); prev_x = xcs[j]
                 pred_c = center + cslope * dx
@@ -575,8 +622,18 @@ def _trace_staff_lines(gray: np.ndarray):
                         cslope *= 0.7
                 L[:, j] = center + scale * offset
 
-        _sweep(range(ci + 1, len(xcs)), float(seeds.mean()), 1.0, 0.0)
-        _sweep(range(ci - 1, -1, -1), float(seeds.mean()), 1.0, 0.0)
+        # A rough left sweep from the (robust, page-centre) seed establishes the
+        # comb at the far-left column, then a single continuous left-to-right pass
+        # re-traces the whole width. Tracing in one direction leaves the only seam
+        # at column 0 (the blank margin, later truncated) instead of at page
+        # centre, where two independent half-sweeps used to meet with a small
+        # slope mismatch and leave a visible kink through the music.
+        _sweep(range(ci - 1, -1, -1), float(seeds.mean()), 1.0, 0.0, ci)
+        c0 = float(np.nanmean(L[:, 0]))
+        denom = float((offset * offset).sum())
+        s0 = float(np.clip(((L[:, 0] - c0) * offset).sum() / denom, 0.6, 1.6)) if denom > 0 else 1.0
+        _sweep(range(1, len(xcs)), c0, s0, 0.0, 0)
+        L[:, 0] = c0 + s0 * offset
 
         k = 7  # light along-x smoothing kills jitter, keeps the real bend
         for ki in range(L.shape[0]):
