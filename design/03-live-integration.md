@@ -233,9 +233,110 @@ beyond available browser memory (~2–4 GB heap on desktop).
 
 ---
 
+## GPU acceleration (WebGL / WebGPU)
+
+The Pyodide path runs OpenCV's C code as WASM at ~90% native speed, so
+the pixel-heavy operations are already fast. But several stages are
+*embarrassingly parallel* per-pixel work — exactly what GPUs are built
+for — and offloading them can cut per-page time roughly in half.
+
+### Which stages benefit
+
+| Stage | CPU character | GPU fit | Notes |
+| --- | --- | --- | --- |
+| **`cv2.remap`** (Coons warp, straightening, de-shear, alignment — called 3–6× per page) | Per-pixel UV lookup on a 4000×6000 image | **✅ Perfect** — literal texture sampling | Dominates total runtime. The [cinematic demo](02-website.md) already does the Coons remap in WebGL (Three.js + UV grid), so we have a working proof-of-concept. |
+| **GaussianBlur, bilateralFilter** | Convolution | **✅ Classic GPU** | Well-studied; single-pass fragment shaders. |
+| **Threshold, illumination normalization, alpha composite** | Per-pixel arithmetic | **✅ Trivial** | One fragment shader each; can batch several into a single pass. |
+| **Morphology** (erode / dilate / open / close) | Small-kernel convolution | **🟡 Marginal** | Kernel sizes are small (3–15 px); GPU dispatch overhead may eat the speedup. Worth trying but not the priority. |
+| **connectedComponents, findContours** | Sequential flood-fill / boundary trace | **❌ Serial** | Inherently data-dependent; stay on CPU. |
+| **Staff-line tracing** (coupled comb) | Sequential column-by-column scan | **❌ Serial** | Data-dependent decisions at every column; stay on CPU. |
+| **Seam detection** | Column medians + Theil–Sen fit | **❌ Serial** | Light enough that GPU offload gains nothing. |
+
+### Hybrid architecture
+
+Python keeps the algorithmic complexity (boundary fitting, comb tracing,
+seam detection). The GPU handles the heavy per-pixel transforms. Data
+moves between them as typed arrays.
+
+```
+Python (Pyodide Web Worker)              GPU (WebGL 2 / WebGPU)
+───────────────────────────              ──────────────────────
+Segment (contours, CC)             →
+Corner / boundary detection        →
+  compute Coons UV map             →     remap via texture sample  ← ~instant
+                                   ←     rectified plate back
+Ink cleanup (threshold, staff      →
+  tracing, displacement field)     →     remap (straighten)        ← ~instant
+                                   ←     straightened image back
+                                         blur + normalize + alpha   ← batched
+                                   ←     final cleaned image
+Assemble PDF                       →
+```
+
+### Data transfer between Pyodide and GPU
+
+The transfer path matters — copying a 4000×6000 image between WASM heap
+and GPU is non-trivial.
+
+- **Pyodide → GPU:** Python produces a NumPy array → export as
+  `Uint8Array` view on the WASM heap → JS wraps it as a WebGL texture
+  via `texImage2D`. One copy (WASM heap → GPU VRAM).
+- **GPU → Pyodide:** Render to framebuffer → `readPixels` into a
+  `Uint8Array` → write into Pyodide's WASM heap. One copy back.
+- **With `SharedArrayBuffer`** (requires COOP/COEP headers on the
+  GitHub Pages site): zero-copy views are possible between the main
+  thread (GPU access) and the Web Worker (Pyodide), avoiding the
+  `postMessage` serialization overhead.
+- **WebGPU** (if targeting only Chrome/Edge/Firefox): `GPUBuffer` ↔
+  `ArrayBuffer` mappings are more efficient than WebGL's `readPixels`.
+
+Each transfer direction costs ~5–15 ms for a 4000×6000 grayscale image
+(~24 MB). With 3–6 remap passes, that's ~30–90 ms of transfer overhead —
+negligible compared to the seconds saved on the remap itself.
+
+### Estimated impact
+
+| | CPU-only (Pyodide WASM) | Hybrid (Pyodide + GPU) |
+| --- | --- | --- |
+| Remap passes (×4 avg) | ~2–4 s | ~50–100 ms |
+| Blur + threshold + composite | ~0.5–1 s | ~20–50 ms |
+| Sequential stages (unchanged) | ~1–2 s | ~1–2 s |
+| Data transfer overhead | — | ~60–90 ms |
+| **Total per page** | **~3–8 s** | **~1.5–3 s** |
+
+Roughly **2–3× faster**, with the remap stages going from the dominant
+cost to negligible. The sequential Python stages become the new floor.
+
+### Technology choice: WebGL 2 vs. WebGPU
+
+| | WebGL 2 | WebGPU |
+| --- | --- | --- |
+| Browser support (2026) | ✅ Universal (Chrome, Firefox, Safari, Edge, mobile) | 🟡 Chrome/Edge/Firefox stable; Safari partial |
+| Compute shaders | ❌ Fragment shaders only (render-to-texture) | ✅ Native compute shaders |
+| Data transfer efficiency | `readPixels` (synchronous, blocking) | `mapAsync` (async, non-blocking) |
+| Complexity | Low — well-understood, many examples | Higher — newer API surface |
+| Our existing code | The cinematic demo is already WebGL + Three.js | Would need new code |
+
+**Recommendation:** Start with **WebGL 2** — universal support, the demo
+site already proves the Coons remap works this way, and fragment shaders
+are sufficient for our operations (remap = texture sample, blur =
+convolution, threshold = step function). Add a WebGPU path later if
+profiling shows `readPixels` blocking is a bottleneck.
+
+### When to build this
+
+GPU acceleration is a **Phase 2+ optimisation**, not a prerequisite. The
+CPU-only Pyodide path (3–8 s per page) is already usable — people will
+wait a few seconds for a tool that saves them a trip to a flatbed scanner.
+Build the basic pipeline first (Phases 0–1), measure real-world timings,
+then add the GPU path where profiling shows the biggest wins (almost
+certainly `remap` first).
+
+---
+
 ## Porting roadmap (high level)
 
-Phase 0 below is the scope of the next PR. Phases 1–3 are future work.
+Phase 0 below is the scope of the next PR. Phases 1–4 are future work.
 
 ### Phase 0 — pypdfium2 → PyMuPDF migration (CLI)
 
@@ -261,7 +362,15 @@ logic changes. Validate against the existing samples.
 - Handle booklet mode, straightening, page-size / DPI configuration.
 - Mobile: auto-downscale input images when available memory is low.
 
-### Phase 3 — UX integration with the existing site
+### Phase 3 — GPU acceleration
+
+- Offload `cv2.remap` to WebGL 2 (texture-sample the Coons UV map).
+- Batch blur + threshold + alpha composite into a multi-pass shader.
+- Profile transfer overhead; add WebGPU path if `readPixels` is the
+  bottleneck.
+- A/B measure: CPU-only vs. hybrid on real pages.
+
+### Phase 4 — UX integration with the existing site
 
 - Integrate the converter into the existing `docs/` site alongside the
   cinematic demo.
