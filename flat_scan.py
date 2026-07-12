@@ -248,7 +248,8 @@ def largest_component(binary: np.ndarray, min_area_frac: float = 0.05) -> np.nda
 
 
 def repair_boundary_defects(mask: np.ndarray, min_dev_frac: float = 0.006,
-                         max_width_frac: float = 0.15) -> np.ndarray:
+                         max_width_frac: float = 0.15,
+                         paper: np.ndarray | None = None) -> np.ndarray:
     """Repair narrow, localized segmentation defects on the page boundary.
 
     A photographed page is essentially a convex quad whose edges are straight or
@@ -271,6 +272,16 @@ def repair_boundary_defects(mask: np.ndarray, min_dev_frac: float = 0.006,
     out to the true edge and outward bulges are trimmed back to it. Broad edge
     bow is left untouched (the smooth copy matches it, so nothing is flagged).
     No absolute page dimensions are assumed — thresholds scale with the contour.
+
+    ``paper`` (optional) is a binary paper/background map (bright paper = nonzero,
+    e.g. the illumination-normalized Otsu seed). When supplied it guards *outward*
+    trims against amputating a real, gently-curved page edge: a page photographed
+    flat has convex top/bottom edges that can bow past the ``min_dev`` tolerance
+    and would otherwise be misread as glare/adjacent-sheet bulges and chorded off.
+    An outward run is only trimmed when the sliver it would remove is mostly
+    background; when that sliver is mostly paper the boundary is the true (curved)
+    edge and is left intact. Inward notch fills are unaffected. With ``paper=None``
+    the behaviour is exactly the original deviation-only repair.
     """
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
@@ -330,6 +341,7 @@ def repair_boundary_defects(mask: np.ndarray, min_dev_frac: float = 0.006,
         starts = idx[np.where(np.diff(np.r_[idx[-1] - m, idx]) != 1)[0]]
         pass_changed = False
         new_poly = poly.copy()
+        centroid = poly.mean(0)
         for s0 in starts:
             run = []
             i = s0
@@ -355,6 +367,25 @@ def repair_boundary_defects(mask: np.ndarray, min_dev_frac: float = 0.006,
                 continue
             a = poly[(lo - 1) % m]
             b = poly[(hi + 1) % m]
+            # Content guard (only when a paper map is supplied): a real page edge
+            # bows *outward* and is solid paper, whereas a glare/table bulge is
+            # background. Distinguish the two by what the bridge would remove — if
+            # the sliver between the current boundary and the chord is mostly
+            # paper, this "defect" is the true curved edge, so keep it. Inward
+            # notches (bridge adds area) are always filled as before.
+            if paper is not None:
+                span_pts = poly[span]
+                bmid = span_pts.mean(0)
+                cmid = 0.5 * (a + b)
+                outward = (np.hypot(*(bmid - centroid)) >
+                           np.hypot(*(cmid - centroid)))
+                if outward:
+                    sl_poly = np.vstack([a, span_pts, b]).astype(np.int32).reshape(-1, 1, 2)
+                    sliver = np.zeros(mask.shape, np.uint8)
+                    cv2.fillPoly(sliver, [sl_poly], 255)
+                    sel = sliver > 0
+                    if sel.any() and float((paper[sel] > 0).mean()) > 0.5:
+                        continue
             for step, j in enumerate(span, start=1):
                 t = step / (len(span) + 1)
                 new_poly[j] = (1.0 - t) * a + t * b
@@ -428,8 +459,10 @@ def segment_page(img_bgr: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]
     # the dominant page component for a clean single-contour boundary.
     mask = largest_component(mask)
     # Repair localized concave defects (finger/shadow notches) so they are not
-    # propagated into the page interior by the Coons patch.
-    mask = repair_boundary_defects(mask)
+    # propagated into the page interior by the Coons patch. Pass the normalized
+    # Otsu paper map so a genuine curved page edge is never mistaken for an
+    # outward bulge and chorded flat.
+    mask = repair_boundary_defects(mask, paper=seed)
 
     debug = {
         "01_lightness_raw.png": L,
