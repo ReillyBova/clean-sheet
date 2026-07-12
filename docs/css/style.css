@@ -68,18 +68,22 @@ code {
   font-size: 1.6rem;
   letter-spacing: 0.01em;
 }
+.brand-sep {
+  width: 1px;
+  height: 26px;
+  background: linear-gradient(180deg, transparent, rgba(224,169,74,0.45), transparent);
+}
 .brand-by {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   color: var(--muted-2);
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   font-weight: 500;
 }
-.brand-by::before {
-  content: "—";
-  margin: 0 10px 0 4px;
-  color: rgba(224, 169, 74, 0.5);
-}
-.brand-by a { color: var(--muted); text-decoration: none; transition: color 0.2s ease; }
-.brand-by a:hover { color: var(--gold-soft); }
+.brand-solstice { display: inline-flex; align-items: center; opacity: 0.9; transition: opacity 0.2s ease; }
+.brand-solstice:hover { opacity: 1; }
+.brand-solstice img { height: 30px; width: auto; display: block; }
 .ghlink {
   color: var(--muted);
   text-decoration: none;
@@ -359,6 +363,8 @@ code {
   font-size: 0.85rem;
   border-top: 1px solid rgba(255,255,255,0.06);
 }
+.site-footer a { color: var(--muted); text-decoration: none; transition: color 0.2s ease; }
+.site-footer a:hover { color: var(--gold-soft); }
 
 /* ---------- responsive ---------- */
 @media (max-width: 860px) {
