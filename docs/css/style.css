@@ -259,9 +259,19 @@ code {
   margin: 10px 0 14px;
   letter-spacing: -0.01em;
 }
-.stage-blurb { color: var(--muted); font-size: 1.05rem; max-width: 42ch; }
-.stage-title, .stage-blurb { transition: opacity .35s ease, transform .35s ease; }
-.readout.swap .stage-title, .readout.swap .stage-blurb { opacity: 0; transform: translateY(6px); }
+.stage-blurb {
+  color: var(--muted);
+  font-size: 1.05rem;
+  line-height: 1.5;
+  max-width: 42ch;
+  /* Reserve ~3 lines so swapping captions never shifts the layout. */
+  min-height: 4.5em;
+}
+.stage-title, .stage-blurb {
+  transition: opacity .45s cubic-bezier(.4,0,.2,1), transform .45s cubic-bezier(.4,0,.2,1);
+  will-change: opacity, transform;
+}
+.readout.swap .stage-title, .readout.swap .stage-blurb { opacity: 0; transform: translateY(5px); }
 
 /* ---------- scrubber ---------- */
 .scrubber { margin-top: 26px; max-width: 42ch; }
@@ -279,6 +289,17 @@ code {
   background: linear-gradient(90deg, var(--gold), var(--gold-soft));
 }
 .ticks { position: absolute; inset: 0; pointer-events: none; }
+/* finish dot at the end of the timeline (g = 1) */
+.track::after {
+  content: "";
+  position: absolute; top: 50%; left: 100%;
+  transform: translate(-50%, -50%);
+  width: 11px; height: 11px; border-radius: 50%;
+  border: 2px solid var(--wood-0);
+  background: var(--gold);
+  box-shadow: 0 0 0 3px rgba(224,169,74,0.18);
+  pointer-events: none;
+}
 .tick {
   position: absolute; top: 50%; transform: translate(-50%, -50%);
   width: 11px; height: 11px; border-radius: 50%;
@@ -371,7 +392,7 @@ code {
 @media (max-width: 860px) {
   .showcase {
     grid-template-columns: 1fr;
-    grid-template-areas: "viewport" "readout";
+    grid-template-areas: "viewport" "readout" "reel";
     gap: 22px;
   }
   .viewport { height: auto; max-width: 420px; width: 100%; margin: 0 auto; }
@@ -379,6 +400,35 @@ code {
   .closer-grid { grid-template-columns: 1fr; }
   .readout { text-align: center; }
   .stage-blurb { margin: 0 auto; }
+  .reel { justify-content: safe center; margin-top: 22px; }
+}
+
+@media (max-width: 640px) {
+  .site-header { padding: 18px 18px; }
+  .brand-name { font-size: 1.5rem; }
+  .brand-solstice img { height: 22px; }
+  .brand-sep { height: 22px; }
+  .hero { padding-left: 18px; padding-right: 18px; }
+  .showcase { padding: 0 16px 32px; }
+  .stage-title { font-size: clamp(1.5rem, 6.5vw, 2rem); }
+  .stage-blurb { font-size: 1rem; min-height: 5em; }
+}
+
+@media (max-width: 440px) {
+  .site-header { flex-wrap: wrap; gap: 10px 12px; padding: 14px 14px; }
+  .brand { gap: 8px; flex-wrap: wrap; }
+  .brand-name { font-size: 1.3rem; }
+  .brand-by { font-size: 0.8rem; gap: 6px; }
+  .brand-sep { height: 20px; }
+  .brand-solstice img { height: 17px; }
+  .ghlink { font-size: 0.85rem; padding: 6px 11px; }
+  .hero { padding-left: 14px; padding-right: 14px; }
+  .hero-sub { font-size: 0.98rem; }
+  .showcase { padding: 0 12px 28px; }
+  .scrubber { max-width: 100%; }
+  .reel-item, .reel-thumb { width: 62px; }
+  .reel-thumb { height: 78px; }
+  .site-footer { padding: 20px 14px 36px; font-size: 0.8rem; text-align: center; }
 }
 
 @media (prefers-reduced-motion: reduce) {

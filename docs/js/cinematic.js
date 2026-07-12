@@ -347,22 +347,24 @@ export class Cinematic {
     if (!this.ready) return;
     this._g = g;
 
-    // --- phase envelopes (overlapping = continuous) ---
-    // your photo -> find page -> MAP -> LIFT FLAT -> FIND STAVES -> IRON FLAT -> CLEAN INK
-    const morphT   = sstep(0.44, 0.60, g);              // dewarp / un-warp (lift flat)
-    const hlOp     = (sstep(0.11, 0.20, g) - sstep(0.40, 0.50, g)) * 0.34;
-    const outDraw  = sstep(0.11, 0.24, g);
-    const gridDraw = sstep(0.26, 0.44, g);              // map: diagonal corner sweep
-    const linesOut = 1 - sstep(0.56, 0.62, g);          // UV grid+outline fade as it flattens
-    const outOp    = sstep(0.14, 0.22, g) * linesOut;
-    const gridOp   = sstep(0.26, 0.32, g) * linesOut;
-    const bgFade   = 1 - sstep(0.44, 0.60, g) * 0.95;   // background darkens as page lifts
-    const rectIn   = sstep(0.56, 0.63, g);              // photo -> dewarped rect (seamless)
-    const pageOut  = sstep(0.63, 0.70, g);              // hide page once rect fully covers it
-    const findDraw = sstep(0.62, 0.78, g);              // staff highlights wipe on (longer)
-    const ironT    = sstep(0.76, 0.88, g);              // iron the page + staves flat
-    const staffFade = 1 - sstep(0.86, 0.93, g);         // highlights fade as ink develops
-    const finalT   = sstep(0.88, 0.99, g);              // lit rect -> crisp clean ink
+    // --- phase envelopes ---
+    // Each step's motion finishes ~80% into its caption window, so the stage
+    // settles briefly before the next caption. Phase `at`s (app.js): your photo
+    // 0.0, find 0.11, map 0.26, lift 0.44, staves 0.62, iron 0.76, clean 0.88.
+    const morphT   = sstep(0.45, 0.58, g);              // lift it flat (dewarp)
+    const hlOp     = (sstep(0.12, 0.18, g) - sstep(0.30, 0.40, g)) * 0.32;
+    const outDraw  = sstep(0.12, 0.23, g);              // find the page
+    const gridDraw = sstep(0.27, 0.40, g);              // map the surface
+    const linesOut = 1 - sstep(0.55, 0.60, g);          // UV grid+outline fade
+    const outOp    = sstep(0.13, 0.19, g) * linesOut;
+    const gridOp   = sstep(0.27, 0.31, g) * linesOut;
+    const bgFade   = 1 - sstep(0.45, 0.58, g) * 0.95;   // background darkens on lift
+    const rectIn   = sstep(0.56, 0.61, g);              // photo -> dewarped rect
+    const pageOut  = sstep(0.61, 0.66, g);              // hide page once rect covers it
+    const findDraw = sstep(0.63, 0.73, g);              // staff highlights wipe on
+    const staffOp  = sstep(0.63, 0.67, g) * (1 - sstep(0.89, 0.95, g)); // quick in, fade at clean
+    const ironT    = sstep(0.77, 0.86, g);              // iron the page + staves flat
+    const finalT   = sstep(0.885, 0.98, g);             // lit rect -> crisp clean ink
 
     this._writePositions(morphT, 0);
     this._writeStaffOverlay(ironT);
@@ -374,7 +376,11 @@ export class Cinematic {
     // The rect texture fades in ON TOP of the still-opaque page (they look
     // identical), then the page is hidden only once rect fully covers it — so no
     // dark background ever shows through the handoff (no vignette flash).
-    this.pageMat.opacity = sstep(0.44, 0.49, g) * (1 - pageOut);
+    // The page mesh must be fully opaque and still coincident with the background
+    // photo BEFORE it starts moving, or the fade-in overlaps the motion and
+    // ghosts against the background. So it reaches full opacity by 0.44, and the
+    // lift (morphT) only begins at 0.45.
+    this.pageMat.opacity = sstep(0.40, 0.44, g) * (1 - pageOut);
     if (this.rectMat) {
       // Stay opaque through iron AND clean; the ink fades in on top (identical
       // geometry now), so the crossfade is tone-only with no dark flash.
@@ -384,7 +390,9 @@ export class Cinematic {
       this.rectGeo.attributes.uv.needsUpdate = true;
     }
     if (this.staffMat) {
-      this.staffMat.opacity = Math.max(0, findDraw * staffFade);
+      // Opacity fades in fast (smooth) while the draw-range wipes the lines on
+      // left-to-right; decoupling them avoids the choppy per-segment pop.
+      this.staffMat.opacity = Math.max(0, staffOp);
       this.staffGeo.setDrawRange(0, Math.max(0, Math.floor((this.staffN / 2) * findDraw) * 2));
     }
     if (this.inkMat) this.inkMat.opacity = finalT;
