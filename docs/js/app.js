@@ -7,17 +7,17 @@ import { Cinematic } from "./cinematic.js";
 const $ = (s) => document.querySelector(s);
 
 const PHASES = [
-  { key: "capture",  title: "The capture",     blurb: "A phone photo, angled and unevenly lit, curling at the edges — shot on whatever dark surface was handy.", at: 0.0 },
-  { key: "find",     title: "Find the page",   blurb: "The sheet is isolated from its background and its outline traced — no assumption about the surface behind it.", at: 0.13 },
+  { key: "capture",  title: "Your photo",      blurb: "A basic capture — angled, unevenly lit, curling off the table.", at: 0.0 },
+  { key: "find",     title: "Find the page",   blurb: "The sheet is isolated from the table, and the binding crease is found so the facing page and fold are cut away.", at: 0.11 },
   { key: "map",      title: "Map the surface", blurb: "A UV grid is fitted to the page, capturing exactly how the paper bends and curls in space.", at: 0.26 },
-  { key: "flatten",  title: "Lift it flat",    blurb: "The page lifts off the background and un-warps — grid, border and all — onto a true, flat rectangle.", at: 0.40 },
-  { key: "staves",   title: "Find the staves", blurb: "The staff lines are detected and traced — five to a system — even where notes, ties and bar lines cross them.", at: 0.57 },
-  { key: "iron",     title: "Iron it flat",    blurb: "Using the staff lines themselves, the remaining waviness is ironed out — every system pulled ruler-straight.", at: 0.67 },
-  { key: "clean",    title: "Clean the ink",   blurb: "Uneven lighting is divided out and the ink develops into fine, even soft-grayscale — a clean sheet.", at: 0.85 },
+  { key: "flatten",  title: "Lift it flat",    blurb: "The page lifts off the background and un-warps — grid, border and all — onto a true, flat rectangle.", at: 0.44 },
+  { key: "staves",   title: "Find the staves", blurb: "Every staff line is detected and traced.", at: 0.62 },
+  { key: "iron",     title: "Iron it flat",    blurb: "The staves are pulled ruler-straight.", at: 0.76 },
+  { key: "clean",    title: "Clean the ink",   blurb: "Uneven lighting is divided out and the ink develops into fine, even soft-grayscale — a clean sheet.", at: 0.88 },
 ];
 
-const LOOP_MS = 15000;
-const HOLD_MS = 1400;
+const LOOP_MS = 26000;
+const HOLD_MS = 1600;
 
 const els = {
   showcase: $("#showcase"),

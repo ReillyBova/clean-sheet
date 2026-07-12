@@ -80,25 +80,32 @@ def build_example(eid, label, pdf, page1, booklet, dims):
     gwv = cleaned if cleaned.ndim == 2 else cv2.cvtColor(cleaned, cv2.COLOR_BGR2GRAY)
     hh, ww = gwv.shape
 
-    straightened, _ = fd.straighten_staves(cleaned)
-    straightened, _ = fd.deskew_barlines(straightened)
-    straightened, _ = fd.align_system_margins(straightened)
-    straightened, _ = fd.align_right_margin(straightened)
-    straightened, _ = fd.center_content(straightened)
+    # The webapp's "iron flat" is exactly the guided staff-straighten warp, so the
+    # demo's final ink must be that SAME warp applied to the cleaned page -- not
+    # the full production straighten (which also deskews, aligns margins and
+    # centres). Matching them makes the iron->clean crossfade a pure tone change
+    # (no ghosting), which the extra production steps would otherwise introduce.
+    sdisp, _sinfo = fd._staff_guided_displacement(gwv)
+    if sdisp is not None:
+        smx, smy = sdisp
+        final_clean = cv2.remap(cleaned, smx.astype(np.float32), smy.astype(np.float32),
+                                cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    else:
+        final_clean, _ = fd.straighten_staves(cleaned)
 
     web_write(os.path.join(STAGES, eid, "input.jpg"), img_bgr)
     web_write(os.path.join(STAGES, eid, "rect.jpg"), rect)
-    web_write(os.path.join(STAGES, eid, "ink.jpg"), straightened)
+    web_write(os.path.join(STAGES, eid, "ink.jpg"), final_clean)
 
     # reprojection morph grid: source (photo) positions per mesh vertex, 0..1
     mx, my = fs.coons_maps(edges, GRID_W, GRID_H)
     src = np.stack([mx / (W - 1), my / (H - 1)], axis=-1)
 
     # staff geometry (for the "find the staves" overlay and its ironing) + the
-    # straighten UV-morph grid (irons the rect texture flat as a real warp).
+    # straighten UV-morph grid (irons the rect texture flat as a real warp). Reuse
+    # the guided displacement computed above so the morph exactly matches ink.jpg.
     straighten = None
     staves = []
-    sdisp, _sinfo = fd._staff_guided_displacement(gwv)
     if sdisp is not None:
         _smx, smy = sdisp
         gi = np.linspace(0, ww - 1, GRID_W).round().astype(int)

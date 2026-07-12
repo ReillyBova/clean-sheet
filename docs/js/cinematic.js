@@ -17,6 +17,9 @@ const GOLD = 0xe0a94a, GOLD_SOFT = 0xf0cd8a, AMBER = 0xf2a327;
 // UV mesh reads over the cream page, so it needs to go *darker* (not brighter) to
 // stay legible; a deep bronze keeps the warm palette while contrasting on paper.
 const GRID = 0x7a4e12;
+// Staff highlights sit on the cream page too and must pop hard — a saturated
+// vermilion reads at a glance without leaving the warm palette.
+const STAFF = 0xd83a1b;
 
 export class Cinematic {
   constructor(canvas) { this.canvas = canvas; this.ready = false; }
@@ -289,7 +292,7 @@ export class Cinematic {
     this.staffN = nseg * 2;
     this.staffGeo = new THREE.BufferGeometry();
     this.staffGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(this.staffN * 3), 3));
-    this.staffMat = new THREE.LineBasicMaterial({ color: AMBER, transparent: true, opacity: 0 });
+    this.staffMat = new THREE.LineBasicMaterial({ color: STAFF, transparent: true, opacity: 0 });
     this.staff = new THREE.LineSegments(this.staffGeo, this.staffMat);
     this.staff.position.z = 0.028;
     this.scene.add(this.staff);
@@ -345,20 +348,21 @@ export class Cinematic {
     this._g = g;
 
     // --- phase envelopes (overlapping = continuous) ---
-    // capture -> find page -> map -> LIFT FLAT -> FIND STAVES -> IRON FLAT -> CLEAN INK
-    const morphT   = sstep(0.38, 0.54, g);              // dewarp / un-warp (lift flat)
-    const hlOp     = (sstep(0.08, 0.18, g) - sstep(0.34, 0.44, g)) * 0.34;
-    const outDraw  = sstep(0.14, 0.26, g);
-    const gridDraw = sstep(0.24, 0.42, g);              // diagonal corner sweep
-    const linesOut = 1 - sstep(0.48, 0.56, g);          // UV grid+outline fade as it flattens
-    const outOp    = sstep(0.14, 0.20, g) * linesOut;
-    const gridOp   = sstep(0.24, 0.30, g) * linesOut;
-    const bgFade   = 1 - sstep(0.38, 0.54, g) * 0.95;   // background darkens as page lifts
-    const rectIn   = sstep(0.50, 0.58, g);              // photo -> dewarped rect (seamless)
-    const findDraw = sstep(0.56, 0.68, g);              // staff highlights wipe on
-    const ironT    = sstep(0.66, 0.84, g);              // iron the page + staves flat
-    const staffFade = 1 - sstep(0.80, 0.88, g);         // highlights fade as ink develops
-    const finalT   = sstep(0.85, 0.99, g);              // lit rect -> crisp clean ink
+    // your photo -> find page -> MAP -> LIFT FLAT -> FIND STAVES -> IRON FLAT -> CLEAN INK
+    const morphT   = sstep(0.44, 0.60, g);              // dewarp / un-warp (lift flat)
+    const hlOp     = (sstep(0.11, 0.20, g) - sstep(0.40, 0.50, g)) * 0.34;
+    const outDraw  = sstep(0.11, 0.24, g);
+    const gridDraw = sstep(0.26, 0.44, g);              // map: diagonal corner sweep
+    const linesOut = 1 - sstep(0.56, 0.62, g);          // UV grid+outline fade as it flattens
+    const outOp    = sstep(0.14, 0.22, g) * linesOut;
+    const gridOp   = sstep(0.26, 0.32, g) * linesOut;
+    const bgFade   = 1 - sstep(0.44, 0.60, g) * 0.95;   // background darkens as page lifts
+    const rectIn   = sstep(0.56, 0.63, g);              // photo -> dewarped rect (seamless)
+    const pageOut  = sstep(0.63, 0.70, g);              // hide page once rect fully covers it
+    const findDraw = sstep(0.62, 0.78, g);              // staff highlights wipe on (longer)
+    const ironT    = sstep(0.76, 0.88, g);              // iron the page + staves flat
+    const staffFade = 1 - sstep(0.86, 0.93, g);         // highlights fade as ink develops
+    const finalT   = sstep(0.88, 0.99, g);              // lit rect -> crisp clean ink
 
     this._writePositions(morphT, 0);
     this._writeStaffOverlay(ironT);
@@ -367,17 +371,20 @@ export class Cinematic {
     this.outMat.opacity = Math.max(0, outOp);
     this.gridMat.opacity = Math.max(0, gridOp);
     this.bgMat.opacity = bgFade;
-    // page (dewarped photo) appears on lift, hands off to the rect texture, which
-    // irons flat, then hands off to the clean ink.
-    this.pageMat.opacity = sstep(0.38, 0.43, g) * (1 - rectIn);
+    // The rect texture fades in ON TOP of the still-opaque page (they look
+    // identical), then the page is hidden only once rect fully covers it — so no
+    // dark background ever shows through the handoff (no vignette flash).
+    this.pageMat.opacity = sstep(0.44, 0.49, g) * (1 - pageOut);
     if (this.rectMat) {
-      this.rectMat.opacity = rectIn * (1 - finalT);
+      // Stay opaque through iron AND clean; the ink fades in on top (identical
+      // geometry now), so the crossfade is tone-only with no dark flash.
+      this.rectMat.opacity = rectIn;
       const a = this.uvRectFlat, b = this.uvRectStraight, uv = this.rectGeo.attributes.uv.array;
       for (let n = 0; n < a.length; n++) uv[n] = a[n] + (b[n] - a[n]) * ironT;
       this.rectGeo.attributes.uv.needsUpdate = true;
     }
     if (this.staffMat) {
-      this.staffMat.opacity = Math.max(0, findDraw * staffFade * 0.95);
+      this.staffMat.opacity = Math.max(0, findDraw * staffFade);
       this.staffGeo.setDrawRange(0, Math.max(0, Math.floor((this.staffN / 2) * findDraw) * 2));
     }
     if (this.inkMat) this.inkMat.opacity = finalT;
