@@ -13,16 +13,21 @@ Approach (grounded in standard document-dewarping / OMR techniques):
      histograms (Dalitz/Fujinaga-style).
   2. Emphasize thin horizontal ink to isolate staff-line structure and group it
      into staff *systems* (the 5-line "combs").
-  3. For each system, measure how its whole comb shifts vertically as we scan
-     across columns, using INCREMENTAL neighbour-to-neighbour correlation. The
-     comb is periodic, so a fixed reference can lock onto the wrong line
-     (+/- one staff space); incremental tracking with a small max-shift follows
-     the gentle, real wave instead.
-  4. Flatten each system by holding its correction CONSTANT across its own
-     vertical band (rigid translation -> internal staff-line spacing is
-     preserved; this avoids a "pinch"), transitioning only between systems in
-     the gaps. Build a monotonic vertical displacement field (which cannot fold
-     and smear) and remap.
+  3. Trace each system as a *coupled comb* (``_trace_staff_lines``): all five
+     lines share one centre curve and one slowly-varying spacing, fit per column,
+     so a line that jumps onto a tie, note or bar line is rejected as a spacing
+     outlier instead of dragging the trace off the staff. The comb is followed in
+     a single continuous pass across the page so there is no seam at the middle.
+  4. Build two candidate warps and keep whichever leaves the staff lines flatter
+     (``_staff_flatness``), so a page is never made worse:
+       - **guided** (``_staff_guided_displacement``) irons each traced comb flat
+         with a per-column RIGID vertical shift -- internal staff-line spacing is
+         preserved (no "pinch"/smear), only the whole comb translates -- blended
+         through the inter-system gaps into a monotonic displacement field. This
+         is the primary path and wins on essentially every real page.
+       - **rigid** (``_straighten_staves_rigid``) is the robust fallback: it
+         measures each system's shift by incremental neighbour-to-neighbour comb
+         correlation and translates it rigidly. Used when the trace is unclear.
 
 Safety first: if too few systems are found (title pages, near-blank pages) or
 the required displacement is implausibly large, the input is returned unchanged.

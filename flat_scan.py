@@ -11,24 +11,22 @@ This is usually better than harsh binary for music parts because it preserves th
 slurs/articulations and avoids turning paper texture into speckle.
 
 Examples:
-  python music_part_phone_scan.py input.pdf output.pdf --page-size 9x12 --dpi 400
-  python music_part_phone_scan.py input.pdf output.pdf --width-in 9 --height-in 12 --dpi 400 --debug --debug-pages 1
-  python music_part_phone_scan.py input.pdf output.pdf --page-size 8.5x11 --mode binary
-  python music_part_phone_scan.py input.pdf output.pdf --page-size 9x12 --starts-on-even
-  python music_part_phone_scan.py input.pdf output.pdf --page-size 9x12 --resume --work-dir output_work
+  python flat_scan.py input.pdf output.pdf --page-size 9x12 --dpi 400
+  python flat_scan.py input.pdf output.pdf --width-in 9 --height-in 12 --dpi 400 --debug --debug-pages 1
+  python flat_scan.py input.pdf output.pdf --page-size 8.5x11 --mode binary
+  python flat_scan.py input.pdf output.pdf --page-size 9x12 --starts-on-even
+  python flat_scan.py input.pdf output.pdf --page-size 9x12 --resume --work-dir output_work
 
 Dependencies:
-  pip install opencv-python numpy pypdfium2 pillow img2pdf
+  pip install opencv-python numpy pypdfium2 img2pdf
 """
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import re
 import shutil
 import sys
-import tempfile
 import gc
 import fnmatch
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -39,7 +37,6 @@ from typing import Iterable
 import cv2
 import numpy as np
 import pypdfium2 as pdfium
-from PIL import Image
 import img2pdf
 
 import flatscan_dewarp

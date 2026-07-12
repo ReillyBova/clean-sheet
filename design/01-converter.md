@@ -196,9 +196,21 @@ what makes the trace robust: a line that jumps onto a tie, note head, slur, or
 bar line becomes a *spacing outlier* and is overridden by the group rather than
 dragging the warp off the staff. Supporting pieces:
 
+- **`_fit_uniform_comb`** locks a rigid five-tooth comb of the known staff pitch
+  (`space + thickness`) onto the centre profile by phase, requiring ≥4 of 5 teeth
+  on ink. Raw peak counting miscounts — a faint line reads as four "lines", a
+  slur/ledger as six — and a wrong count corrupts the comb geometry and kinks the
+  warp; the rigid five-line lock fixes the count and places any faint line by
+  uniformity. Falls back to `_snap_comb` peak seeding for genuine short (1/2-line)
+  percussion staves.
 - **`_snap_comb`** trims phantom endpoint lines (a slur or ledger line mistaken
   for a 6th/0th staff line) by spacing uniformity **and** ink strength; interior
   gaps are never touched, so genuinely faint real lines survive.
+- **Single continuous trace pass.** The comb is followed left-to-right in one
+  pass (after a rough sweep seeds the far-left column), so the only trace seam
+  lands in the blank margin. Two independent half-sweeps meeting at the
+  page-centre seed used to disagree there by a fraction of a staff space and
+  leave a visible *kink* through the middle of otherwise-flat systems.
 - **`_staff_hextent` + shared page extent**: the correction is truncated to the
   staves' real horizontal extent (first inked column → final bar line), taken as
   the **median across systems** since the whole block shares one binding. This
