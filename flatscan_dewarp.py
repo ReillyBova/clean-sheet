@@ -71,8 +71,12 @@ def _emphasize(bw: np.ndarray, thickness: int) -> np.ndarray:
     return cv2.morphologyEx(bw, cv2.MORPH_OPEN, hk)
 
 
-def _find_systems(horiz: np.ndarray, space: int) -> list[tuple[int, int]]:
-    """Return (ytop, ybot) row windows for each detected staff system."""
+def _find_systems_bylines(horiz: np.ndarray, space: int) -> list[tuple[int, int]]:
+    """Legacy detector: group thresholded staff-line-center rows into systems.
+
+    Kept as a fallback for degenerate staves the five-line comb cannot lock
+    (e.g. one/two-line percussion), where there is no real comb to match.
+    """
     proj = (horiz > 0).sum(1).astype(np.float32)
     if proj.max() <= 0:
         return []
@@ -108,6 +112,101 @@ def _find_systems(horiz: np.ndarray, space: int) -> list[tuple[int, int]]:
         bot = g[-1] + int(space * 1.5)
         out.append((max(0, top), min(horiz.shape[0], bot)))
     return out
+
+
+def _find_systems(horiz: np.ndarray, space: int,
+                  thickness: int | None = None) -> list[tuple[int, int]]:
+    """Return (ytop, ybot) row windows for each detected staff system.
+
+    Locks a five-line staff *comb* of the known pitch (``space + thickness``)
+    onto the row projection of the horizontal-emphasis map. The earlier detector
+    counted individual line-center rows and grouped them: on dense systems the
+    staff lines are bridged by note ink so the projection never dips between
+    them, collapsing the five lines into one run -> one "center" -> the system
+    failed the >=3-lines test and was silently dropped or split. Matching a rigid
+    comb instead integrates all five lines at once, so a system is found even
+    when notes bridge or partly occlude its lines.
+
+    The projection is cross-correlated with a *zero-mean* five-tooth comb (unit
+    on the teeth, negative between them). Zero-mean is what sharpens the response
+    to a single peak per system: a plain sum-of-teeth stays high at +/-1 pitch
+    shifts (four teeth still on lines), but the zero-mean comb penalizes the ink
+    that then falls between its teeth. Each response peak is snapped to the best
+    five-tooth alignment and kept only if >=4 of 5 teeth carry ink -- a validation
+    that identifies real systems by structure, not by a global magnitude
+    threshold (staff-line strength decays down a page, so any fixed fraction of
+    the page maximum drops the faintest systems).
+
+    Non-maximum suppression removes each system's weaker secondary lobe (a
+    partial comb ~4-5.5 pitches away) while preserving genuinely close, equally
+    strong staves -- e.g. the two staves of a keyboard/harp grand staff: a
+    near neighbour is suppressed only when it is also markedly weaker.
+    """
+    h = horiz.shape[0]
+    proj = (horiz > 0).sum(1).astype(np.float32)
+    pm = float(proj.max())
+    if pm <= 0:
+        return []
+    if thickness is None:
+        thickness = max(1, int(round(space * 0.18)))
+    pitch = int(round(space + thickness))
+    tw = max(1, int(thickness))
+    klen = 4 * pitch + 1
+    if pitch < 2 or klen >= h:
+        return _find_systems_bylines(horiz, space)
+
+    kern = np.zeros(klen, np.float32)
+    for t in range(5):
+        c = t * pitch
+        kern[max(0, c - tw // 2):c + tw // 2 + 1] = 1.0
+    kern -= kern.mean()  # penalize ink between the teeth -> one peak per system
+    resp = np.maximum(np.convolve(proj, kern[::-1], mode="same"), 0.0)
+    off = (klen - 1) // 2
+    rm = float(resp.max())
+    if rm <= 0:
+        return _find_systems_bylines(horiz, space)
+
+    def _snap(y: int) -> int | None:
+        best = None
+        for dy in range(-pitch, pitch + 1):
+            t0 = y - off + dy
+            if t0 < 0 or t0 + 4 * pitch >= h:
+                continue
+            s = float(sum(proj[t0 + t * pitch] for t in range(5)))
+            if best is None or s > best[0]:
+                best = (s, t0)
+        return None if best is None else best[1]
+
+    items: list[tuple[float, int, int]] = []
+    for y in range(1, h - 1):
+        if resp[y] >= resp[y - 1] and resp[y] > resp[y + 1] and resp[y] > 0.10 * rm:
+            t0 = _snap(y)
+            if t0 is None:
+                continue
+            on = sum(1 for t in range(5) if proj[t0 + t * pitch] > 0.12 * pm)
+            if on >= 4:
+                items.append((float(resp[y]), t0, on))
+    if not items:
+        return _find_systems_bylines(horiz, space)
+
+    # Strongest first (by teeth-on-ink, then response), then greedy suppression.
+    items.sort(key=lambda it: (-it[2], -it[0]))
+    hard = int(round(2.5 * pitch))   # never two systems this close: exact dupes
+    soft = 6 * pitch                 # secondary-lobe range (~4-5.5 pitch)
+    accepted: list[tuple[int, float]] = []
+    for r, t0, _on in items:
+        blocked = False
+        for at, ar in accepted:
+            d = abs(t0 - at)
+            if d < hard or (d < soft and r < 0.6 * ar):
+                blocked = True
+                break
+        if not blocked:
+            accepted.append((t0, r))
+
+    tops = sorted(t for t, _ in accepted)
+    return [(max(0, t - int(space * 1.5)), min(h, t + 4 * pitch + int(space * 1.5)))
+            for t in tops]
 
 
 def _profile(col_block: np.ndarray, ytop: int, ybot: int) -> np.ndarray:
@@ -219,7 +318,7 @@ def compute_displacement(gray: np.ndarray):
     bw = (gray < 150).astype(np.uint8) * 255
     thickness, space = _staff_metrics(bw)
     horiz = _emphasize(bw, thickness)
-    systems = _find_systems(horiz, space)
+    systems = _find_systems(horiz, space, thickness)
     if len(systems) < 2:
         return None, dict(reason="too few systems", nsys=len(systems))
 
@@ -513,7 +612,7 @@ def _trace_staff_lines(gray: np.ndarray):
     thickness, space = _staff_metrics(bw)
     emph = _emphasize(bw, thickness)
     horiz = (emph > 0).astype(np.uint8)
-    systems = _find_systems(emph, space)
+    systems = _find_systems(emph, space, thickness)
     xcs = np.arange(0, w, 6)
     # Raw threshold as a fallback signal. Near the binding the staff lines curl
     # and foreshorten, and the horizontal-opening emphasis (which needs a long
@@ -928,7 +1027,7 @@ def _staff_left_margins(gray: np.ndarray, min_lines: int = 3):
     bw = (gray < 150).astype(np.uint8) * 255
     thickness, space = _staff_metrics(bw)
     horiz = _emphasize(bw, thickness)
-    systems = _find_systems(horiz, space)
+    systems = _find_systems(horiz, space, thickness)
     cys: list[float] = []
     lefts: list[float] = []
     bands: list[tuple[int, int]] = []
@@ -1177,7 +1276,7 @@ def _staff_hextents(gray: np.ndarray, min_lines: int = 3):
     bw = (gray < 150).astype(np.uint8) * 255
     thickness, space = _staff_metrics(bw)
     horiz = _emphasize(bw, thickness)
-    systems = _find_systems(horiz, space)
+    systems = _find_systems(horiz, space, thickness)
     lefts: list[float] = []
     rights: list[float] = []
     bands: list[tuple[int, int]] = []
