@@ -68,6 +68,18 @@ code {
   font-size: 1.6rem;
   letter-spacing: 0.01em;
 }
+.brand-by {
+  color: var(--muted-2);
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+.brand-by::before {
+  content: "—";
+  margin: 0 10px 0 4px;
+  color: rgba(224, 169, 74, 0.5);
+}
+.brand-by a { color: var(--muted); text-decoration: none; transition: color 0.2s ease; }
+.brand-by a:hover { color: var(--gold-soft); }
 .ghlink {
   color: var(--muted);
   text-decoration: none;
