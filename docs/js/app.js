@@ -9,9 +9,10 @@ const $ = (s) => document.querySelector(s);
 const PHASES = [
   { key: "capture",  title: "The capture",     blurb: "A phone photo, angled and unevenly lit, curling at the edges — shot on whatever dark surface was handy.", at: 0.0 },
   { key: "find",     title: "Find the page",   blurb: "The sheet is isolated from its background and its outline traced — no assumption about the surface behind it.", at: 0.13 },
-  { key: "map",      title: "Map the surface", blurb: "A UV grid is fitted to the page, capturing exactly how the paper bends and curls in space.", at: 0.30 },
-  { key: "flatten",  title: "Lift it flat",    blurb: "The page lifts off the background and un-warps — grid, border and all — onto a true, flat rectangle.", at: 0.46 },
-  { key: "clean",    title: "Clean the ink",   blurb: "Uneven lighting is removed and the ink develops into fine, even soft-grayscale — a clean sheet.", at: 0.72 },
+  { key: "map",      title: "Map the surface", blurb: "A UV grid is fitted to the page, capturing exactly how the paper bends and curls in space.", at: 0.28 },
+  { key: "flatten",  title: "Lift it flat",    blurb: "The page lifts off the background and un-warps — grid, border and all — onto a true, flat rectangle.", at: 0.44 },
+  { key: "clean",    title: "Clean the ink",   blurb: "Uneven lighting is divided out and the ink develops into fine, even soft-grayscale — a clean sheet.", at: 0.62 },
+  { key: "straighten", title: "Straighten the staves", blurb: "Using the staff lines themselves, the remaining waviness is ironed flat — every system ruler-straight.", at: 0.72 },
 ];
 
 const LOOP_MS = 15000;
@@ -104,11 +105,12 @@ async function boot() {
 async function loadExample(ex) {
   state.switching = true;
   try {
-    const [photo, ink] = await Promise.all([
+    const [photo, ink, wavy] = await Promise.all([
       loadImage("assets/" + ex.photo.image),
       loadImage("assets/" + ex.ink),
+      ex.wavy ? loadImage("assets/" + ex.wavy) : Promise.resolve(null),
     ]);
-    await state.cine.init(ex, photo, ink);
+    await state.cine.init(ex, photo, ink, wavy);
   } catch (e) { console.warn(e); }
   state.g = 0; state.holding = 0; state.phase = -1;
   setActiveReel(ex.id);

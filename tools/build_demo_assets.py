@@ -72,24 +72,50 @@ def build_example(eid, label, pdf, page1, booklet, dims):
         mask = fs.clip_mask_at_crease(mask, seam)
     rect, edges = fs.rectify_boundary_coons(img_bgr, mask, out_w, out_h, smooth=0.045)
     cleaned, _ink, _thr = fs.clean_ink(rect, mode="soft-gray")
-    cleaned, _ = fd.straighten_staves(cleaned)
-    cleaned, _ = fd.deskew_barlines(cleaned)
-    cleaned, _ = fd.align_system_margins(cleaned)
-    cleaned, _ = fd.align_right_margin(cleaned)
-    cleaned, _ = fd.center_content(cleaned)
+    # wavy = the cleaned soft-gray page BEFORE staff straightening (staves still
+    # bent). The webapp crossfades the dewarped photo into this (lighting removed,
+    # same geometry -> seamless) then irons it flat.
+    wavy = cleaned.copy()
+    gwv = wavy if wavy.ndim == 2 else cv2.cvtColor(wavy, cv2.COLOR_BGR2GRAY)
+    hh, ww = gwv.shape
+
+    straightened, _ = fd.straighten_staves(cleaned)
+    straightened, _ = fd.deskew_barlines(straightened)
+    straightened, _ = fd.align_system_margins(straightened)
+    straightened, _ = fd.align_right_margin(straightened)
+    straightened, _ = fd.center_content(straightened)
 
     web_write(os.path.join(STAGES, eid, "input.jpg"), img_bgr)
-    web_write(os.path.join(STAGES, eid, "ink.jpg"), cleaned)
+    web_write(os.path.join(STAGES, eid, "wavy.jpg"), wavy)
+    web_write(os.path.join(STAGES, eid, "ink.jpg"), straightened)
 
     # reprojection morph grid: source (photo) positions per mesh vertex, 0..1
     mx, my = fs.coons_maps(edges, GRID_W, GRID_H)
     src = np.stack([mx / (W - 1), my / (H - 1)], axis=-1)
+
+    # straighten UV-morph grid: for each flat mesh vertex, the source (u,v) in the
+    # wavy image whose ink lands there once staves are ironed flat. Animating the
+    # wavy texture's UVs from identity -> this grid straightens the staves as a
+    # real warp (no blurry crossfade). Vertical-only (map_x is identity).
+    straighten = None
+    sdisp, _sinfo = fd._staff_guided_displacement(gwv)
+    if sdisp is not None:
+        _smx, smy = sdisp
+        gi = np.linspace(0, ww - 1, GRID_W).round().astype(int)
+        gj = np.linspace(0, hh - 1, GRID_H).round().astype(int)
+        su = np.tile((gi / (ww - 1))[None, :], (GRID_H, 1))
+        sv = smy[np.ix_(gj, gi)] / (hh - 1)
+        ssrc = np.stack([su, sv], axis=-1)
+        straighten = {"w": GRID_W, "h": GRID_H, "src": ssrc.reshape(-1, 2).round(5).tolist()}
+
     return {
         "id": eid,
         "label": label,
         "photo": {"w": int(W), "h": int(H), "image": f"stages/{eid}/input.jpg"},
+        "wavy": f"stages/{eid}/wavy.jpg",
         "ink": f"stages/{eid}/ink.jpg",
         "grid": {"w": GRID_W, "h": GRID_H, "src": src.reshape(-1, 2).round(5).tolist()},
+        "straighten": straighten,
         "output_aspect": round(w_in / h_in, 5),
     }
 

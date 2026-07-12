@@ -25,6 +25,7 @@ export class Cinematic {
     this.ready = false;
     if (this.photoTex) this.photoTex.dispose();
     if (this.inkTex) this.inkTex.dispose();
+    if (this.wavyTex) this.wavyTex.dispose();
     if (this.scene) {
       this.scene.traverse((o) => {
         if (o.geometry) o.geometry.dispose();
@@ -34,7 +35,7 @@ export class Cinematic {
     this.scene = null;
   }
 
-  async init(demo, photoImg, inkImg) {
+  async init(demo, photoImg, inkImg, wavyImg) {
     // Re-callable: switching examples disposes the previous scene/textures and
     // rebuilds, while reusing the single WebGL renderer/canvas.
     this._disposeScene();
@@ -85,6 +86,7 @@ export class Cinematic {
     };
     this.photoTex = mkTex(photoImg);
     this.inkTex = inkImg ? mkTex(inkImg) : null;
+    this.wavyTex = wavyImg ? mkTex(wavyImg) : null;
 
     // background: full photo quad (page + surround), fixed.
     // Built explicitly to match the page mesh's (position, uv) convention:
@@ -138,17 +140,42 @@ export class Cinematic {
     this.page.position.z = 0.0;
     this.scene.add(this.page);
 
-    // ink mesh (cleaned, flat, fades in for the develop)
+    // ink mesh (cleaned + straightened, flat, the crisp final)
     if (this.inkTex) {
       this.inkGeo = new THREE.BufferGeometry();
       const inkPos = new Float32Array(N * 3);
       for (let k = 0; k < N; k++) { inkPos[k*3]=this.dst2d[k*2]; inkPos[k*3+1]=this.dst2d[k*2+1]; inkPos[k*3+2]=0.02; }
       this.inkGeo.setAttribute("position", new THREE.BufferAttribute(inkPos, 3));
-      this.inkGeo.setAttribute("uv", new THREE.BufferAttribute(uvFlat, 2));
+      this.inkGeo.setAttribute("uv", new THREE.BufferAttribute(uvFlat.slice(), 2));
       this.inkGeo.setIndex(indices);
       this.inkMat = new THREE.MeshBasicMaterial({ map: this.inkTex, transparent: true, opacity: 0 });
       this.ink = new THREE.Mesh(this.inkGeo, this.inkMat);
       this.scene.add(this.ink);
+    }
+
+    // wavy mesh (cleaned soft-gray, staves still bent) — sits flat on the plate.
+    // Its UVs morph from identity (shows the wavy page) to the straighten source
+    // grid (samples the wavy texture where each flat pixel came from), which
+    // irons the staves flat as a real warp instead of a blurry crossfade.
+    if (this.wavyTex) {
+      const straight = demo.straighten;
+      this.uvWavyFlat = uvFlat.slice();
+      this.uvWavyStraight = uvFlat.slice();
+      if (straight && straight.src) {
+        for (let k = 0; k < N; k++) {
+          this.uvWavyStraight[k * 2] = straight.src[k][0];
+          this.uvWavyStraight[k * 2 + 1] = 1 - straight.src[k][1];
+        }
+      }
+      this.wavyGeo = new THREE.BufferGeometry();
+      const wavyPos = new Float32Array(N * 3);
+      for (let k = 0; k < N; k++) { wavyPos[k*3]=this.dst2d[k*2]; wavyPos[k*3+1]=this.dst2d[k*2+1]; wavyPos[k*3+2]=0.015; }
+      this.wavyGeo.setAttribute("position", new THREE.BufferAttribute(wavyPos, 3));
+      this.wavyGeo.setAttribute("uv", new THREE.BufferAttribute(this.uvWavyFlat.slice(), 2));
+      this.wavyGeo.setIndex(indices);
+      this.wavyMat = new THREE.MeshBasicMaterial({ map: this.wavyTex, transparent: true, opacity: 0 });
+      this.wavy = new THREE.Mesh(this.wavyGeo, this.wavyMat);
+      this.scene.add(this.wavy);
     }
 
     // highlight fill (faint gold, morphs)
@@ -201,7 +228,9 @@ export class Cinematic {
     this.rig = new THREE.Group();
     this.scene.remove(this.page, this.hl, this.outline, this.grid);
     if (this.ink) this.scene.remove(this.ink);
+    if (this.wavy) this.scene.remove(this.wavy);
     this.rig.add(this.page, this.hl, this.outline, this.grid);
+    if (this.wavy) this.rig.add(this.wavy);
     if (this.ink) this.rig.add(this.ink);
     this.scene.add(this.rig);
 
@@ -253,15 +282,17 @@ export class Cinematic {
     this._g = g;
 
     // --- phase envelopes (overlapping = continuous) ---
-    const morphT   = sstep(0.42, 0.72, g);              // constrained un-warp, no overshoot
-    const hlOp     = (sstep(0.08, 0.18, g) - sstep(0.38, 0.48, g)) * 0.34;
+    const morphT   = sstep(0.40, 0.60, g);              // dewarp / un-warp
+    const hlOp     = (sstep(0.08, 0.18, g) - sstep(0.36, 0.46, g)) * 0.34;
     const outDraw  = sstep(0.14, 0.28, g);
-    const gridDraw = sstep(0.26, 0.46, g);              // slower diagonal corner sweep
-    const linesOut = 1 - sstep(0.62, 0.72, g);          // grid+outline fade as it flattens
+    const gridDraw = sstep(0.26, 0.44, g);              // slower diagonal corner sweep
+    const linesOut = 1 - sstep(0.54, 0.62, g);          // grid+outline fade as it flattens
     const outOp    = sstep(0.14, 0.20, g) * linesOut;
     const gridOp   = sstep(0.26, 0.32, g) * linesOut;
-    const bgFade   = 1 - sstep(0.42, 0.66, g) * 0.95;   // background darkens as page lifts
-    const inkOp    = sstep(0.72, 0.90, g);
+    const bgFade   = 1 - sstep(0.40, 0.60, g) * 0.95;   // background darkens as page lifts
+    const developT = sstep(0.60, 0.70, g);              // dewarped photo -> clean wavy ink
+    const ironT    = sstep(0.70, 0.88, g);              // UV morph: iron staves flat
+    const finalT   = sstep(0.88, 0.99, g);              // ironed wavy -> crisp final
 
     this._writePositions(morphT, 0);
 
@@ -269,10 +300,16 @@ export class Cinematic {
     this.outMat.opacity = Math.max(0, outOp);
     this.gridMat.opacity = Math.max(0, gridOp);
     this.bgMat.opacity = bgFade;
-    if (this.inkMat) this.inkMat.opacity = inkOp;
-    // page mesh only appears as it lifts off the background — before that the
-    // background photo carries the image, so there is no doubled "sheet on top".
-    this.pageMat.opacity = sstep(0.42, 0.47, g);
+    // page (dewarped photo) appears as it lifts, then hands off to the clean wavy
+    // page during "develop"; the wavy page irons flat, then hands off to the ink.
+    this.pageMat.opacity = sstep(0.40, 0.45, g) * (1 - developT);
+    if (this.wavyMat) {
+      this.wavyMat.opacity = developT * (1 - finalT);
+      const a = this.uvWavyFlat, b = this.uvWavyStraight, uv = this.wavyGeo.attributes.uv.array;
+      for (let n = 0; n < a.length; n++) uv[n] = a[n] + (b[n] - a[n]) * ironT;
+      this.wavyGeo.attributes.uv.needsUpdate = true;
+    }
+    if (this.inkMat) this.inkMat.opacity = finalT;
 
     // draw-on
     this.outGeo.setDrawRange(0, Math.max(2, Math.floor(this.perim.length * outDraw)));
