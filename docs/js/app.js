@@ -11,7 +11,7 @@ const PHASES = [
   { key: "find",     title: "Find the page",   blurb: "The page is isolated from its surroundings — table, fold, or any facing sheet — and cropped to its own edges.", at: 0.11 },
   { key: "map",      title: "Map the surface", blurb: "A UV grid is fitted to the page, estimating how the paper bends and curls through space.", at: 0.26 },
   { key: "flatten",  title: "Lift it flat",    blurb: "The page lifts off the background and un-warps — grid and border alike — onto a true flat rectangle.", at: 0.44 },
-  { key: "staves",   title: "Find the staves", blurb: "Every staff line is found and traced, straight through the notes, ties and bar lines crossing it.", at: 0.62 },
+  { key: "staves",   title: "Find the staves", blurb: "The staff lines are detected and traced across the page, through the notes and bar lines crossing them.", at: 0.62 },
   { key: "iron",     title: "Iron it flat",    blurb: "The staves are pulled ruler-straight, ironing out the last of the paper's wave and skew.", at: 0.76 },
   { key: "clean",    title: "Clean the ink",   blurb: "Uneven lighting is divided out and the ink develops into fine, even soft-grayscale — a clean sheet.", at: 0.88 },
 ];
