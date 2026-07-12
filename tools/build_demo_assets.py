@@ -72,11 +72,12 @@ def build_example(eid, label, pdf, page1, booklet, dims):
         mask = fs.clip_mask_at_crease(mask, seam)
     rect, edges = fs.rectify_boundary_coons(img_bgr, mask, out_w, out_h, smooth=0.045)
     cleaned, _ink, _thr = fs.clean_ink(rect, mode="soft-gray")
-    # wavy = the cleaned soft-gray page BEFORE staff straightening (staves still
-    # bent). The webapp crossfades the dewarped photo into this (lighting removed,
-    # same geometry -> seamless) then irons it flat.
-    wavy = cleaned.copy()
-    gwv = wavy if wavy.ndim == 2 else cv2.cvtColor(wavy, cv2.COLOR_BGR2GRAY)
+    # rect = the dewarped page BEFORE ink cleaning (still lit, staves still bent).
+    # The webapp irons THIS flat (staves + page), then develops the clean ink last
+    # -- a reordered, best-looking story (not the engine's true order). `cleaned`
+    # (soft-gray, pre-straighten) is only used to trace the staff geometry, which
+    # has stronger contrast than the lit rect.
+    gwv = cleaned if cleaned.ndim == 2 else cv2.cvtColor(cleaned, cv2.COLOR_BGR2GRAY)
     hh, ww = gwv.shape
 
     straightened, _ = fd.straighten_staves(cleaned)
@@ -86,18 +87,17 @@ def build_example(eid, label, pdf, page1, booklet, dims):
     straightened, _ = fd.center_content(straightened)
 
     web_write(os.path.join(STAGES, eid, "input.jpg"), img_bgr)
-    web_write(os.path.join(STAGES, eid, "wavy.jpg"), wavy)
+    web_write(os.path.join(STAGES, eid, "rect.jpg"), rect)
     web_write(os.path.join(STAGES, eid, "ink.jpg"), straightened)
 
     # reprojection morph grid: source (photo) positions per mesh vertex, 0..1
     mx, my = fs.coons_maps(edges, GRID_W, GRID_H)
     src = np.stack([mx / (W - 1), my / (H - 1)], axis=-1)
 
-    # straighten UV-morph grid: for each flat mesh vertex, the source (u,v) in the
-    # wavy image whose ink lands there once staves are ironed flat. Animating the
-    # wavy texture's UVs from identity -> this grid straightens the staves as a
-    # real warp (no blurry crossfade). Vertical-only (map_x is identity).
+    # staff geometry (for the "find the staves" overlay and its ironing) + the
+    # straighten UV-morph grid (irons the rect texture flat as a real warp).
     straighten = None
+    staves = []
     sdisp, _sinfo = fd._staff_guided_displacement(gwv)
     if sdisp is not None:
         _smx, smy = sdisp
@@ -108,14 +108,31 @@ def build_example(eid, label, pdf, page1, booklet, dims):
         ssrc = np.stack([su, sv], axis=-1)
         straighten = {"w": GRID_W, "h": GRID_H, "src": ssrc.reshape(-1, 2).round(5).tolist()}
 
+    xcs, sys_lines, _space = fd._trace_staff_lines(gwv)
+    xcs = np.asarray(xcs, float)
+    for (_yt, _yb, L) in sys_lines:
+        good = ~np.isnan(L).any(axis=0)
+        if good.sum() < 8:
+            continue
+        gx = xcs[good]
+        idx = np.linspace(0, len(gx) - 1, min(48, len(gx))).round().astype(int)
+        xs = [round(float(gx[i] / (ww - 1)), 4) for i in idx]
+        lines, flat = [], []
+        for k in range(L.shape[0]):
+            yk = L[k][good]
+            lines.append([round(float(yk[i] / (hh - 1)), 4) for i in idx])
+            flat.append(round(float(np.nanmean(L[k]) / (hh - 1)), 4))
+        staves.append({"xs": xs, "lines": lines, "flat": flat})
+
     return {
         "id": eid,
         "label": label,
         "photo": {"w": int(W), "h": int(H), "image": f"stages/{eid}/input.jpg"},
-        "wavy": f"stages/{eid}/wavy.jpg",
+        "rect": f"stages/{eid}/rect.jpg",
         "ink": f"stages/{eid}/ink.jpg",
         "grid": {"w": GRID_W, "h": GRID_H, "src": src.reshape(-1, 2).round(5).tolist()},
         "straighten": straighten,
+        "staves": staves,
         "output_aspect": round(w_in / h_in, 5),
     }
 

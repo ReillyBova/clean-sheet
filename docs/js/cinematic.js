@@ -25,7 +25,7 @@ export class Cinematic {
     this.ready = false;
     if (this.photoTex) this.photoTex.dispose();
     if (this.inkTex) this.inkTex.dispose();
-    if (this.wavyTex) this.wavyTex.dispose();
+    if (this.rectTex) this.rectTex.dispose();
     if (this.scene) {
       this.scene.traverse((o) => {
         if (o.geometry) o.geometry.dispose();
@@ -35,7 +35,7 @@ export class Cinematic {
     this.scene = null;
   }
 
-  async init(demo, photoImg, inkImg, wavyImg) {
+  async init(demo, photoImg, inkImg, rectImg) {
     // Re-callable: switching examples disposes the previous scene/textures and
     // rebuilds, while reusing the single WebGL renderer/canvas.
     this._disposeScene();
@@ -86,7 +86,7 @@ export class Cinematic {
     };
     this.photoTex = mkTex(photoImg);
     this.inkTex = inkImg ? mkTex(inkImg) : null;
-    this.wavyTex = wavyImg ? mkTex(wavyImg) : null;
+    this.rectTex = rectImg ? mkTex(rectImg) : null;
 
     // background: full photo quad (page + surround), fixed.
     // Built explicitly to match the page mesh's (position, uv) convention:
@@ -153,30 +153,35 @@ export class Cinematic {
       this.scene.add(this.ink);
     }
 
-    // wavy mesh (cleaned soft-gray, staves still bent) — sits flat on the plate.
-    // Its UVs morph from identity (shows the wavy page) to the straighten source
-    // grid (samples the wavy texture where each flat pixel came from), which
-    // irons the staves flat as a real warp instead of a blurry crossfade.
-    if (this.wavyTex) {
+    // rect mesh (the dewarped page, still lit, staves still bent) — sits flat on
+    // the plate. Its UVs morph from identity (shows the dewarped page) to the
+    // straighten source grid (samples the texture where each flat pixel came
+    // from), which irons the staves flat as a real warp, not a blurry crossfade.
+    if (this.rectTex) {
       const straight = demo.straighten;
-      this.uvWavyFlat = uvFlat.slice();
-      this.uvWavyStraight = uvFlat.slice();
+      this.uvRectFlat = uvFlat.slice();
+      this.uvRectStraight = uvFlat.slice();
       if (straight && straight.src) {
         for (let k = 0; k < N; k++) {
-          this.uvWavyStraight[k * 2] = straight.src[k][0];
-          this.uvWavyStraight[k * 2 + 1] = 1 - straight.src[k][1];
+          this.uvRectStraight[k * 2] = straight.src[k][0];
+          this.uvRectStraight[k * 2 + 1] = 1 - straight.src[k][1];
         }
       }
-      this.wavyGeo = new THREE.BufferGeometry();
-      const wavyPos = new Float32Array(N * 3);
-      for (let k = 0; k < N; k++) { wavyPos[k*3]=this.dst2d[k*2]; wavyPos[k*3+1]=this.dst2d[k*2+1]; wavyPos[k*3+2]=0.015; }
-      this.wavyGeo.setAttribute("position", new THREE.BufferAttribute(wavyPos, 3));
-      this.wavyGeo.setAttribute("uv", new THREE.BufferAttribute(this.uvWavyFlat.slice(), 2));
-      this.wavyGeo.setIndex(indices);
-      this.wavyMat = new THREE.MeshBasicMaterial({ map: this.wavyTex, transparent: true, opacity: 0 });
-      this.wavy = new THREE.Mesh(this.wavyGeo, this.wavyMat);
-      this.scene.add(this.wavy);
+      this.rectGeo = new THREE.BufferGeometry();
+      const rectPos = new Float32Array(N * 3);
+      for (let k = 0; k < N; k++) { rectPos[k*3]=this.dst2d[k*2]; rectPos[k*3+1]=this.dst2d[k*2+1]; rectPos[k*3+2]=0.015; }
+      this.rectGeo.setAttribute("position", new THREE.BufferAttribute(rectPos, 3));
+      this.rectGeo.setAttribute("uv", new THREE.BufferAttribute(this.uvRectFlat.slice(), 2));
+      this.rectGeo.setIndex(indices);
+      this.rectMat = new THREE.MeshBasicMaterial({ map: this.rectTex, transparent: true, opacity: 0 });
+      this.rect = new THREE.Mesh(this.rectGeo, this.rectMat);
+      this.scene.add(this.rect);
     }
+
+    // staff-highlight overlay: one polyline per traced staff line ("find the
+    // staves"), which then irons flat with the page ("iron flat"). Positions are
+    // rebuilt each frame from the bent y (found) lerped toward the flat y.
+    this._buildStaffOverlay(demo, px0, px1, py0, py1);
 
     // highlight fill (faint gold, morphs)
     this.hlGeo = new THREE.BufferGeometry();
@@ -228,9 +233,11 @@ export class Cinematic {
     this.rig = new THREE.Group();
     this.scene.remove(this.page, this.hl, this.outline, this.grid);
     if (this.ink) this.scene.remove(this.ink);
-    if (this.wavy) this.scene.remove(this.wavy);
+    if (this.rect) this.scene.remove(this.rect);
+    if (this.staff) this.scene.remove(this.staff);
     this.rig.add(this.page, this.hl, this.outline, this.grid);
-    if (this.wavy) this.rig.add(this.wavy);
+    if (this.rect) this.rig.add(this.rect);
+    if (this.staff) this.rig.add(this.staff);
     if (this.ink) this.rig.add(this.ink);
     this.scene.add(this.rig);
 
@@ -245,6 +252,62 @@ export class Cinematic {
     this.renderer.setSize(r.width, r.height, false);
   }
   resize() { if (this.ready) { this._resize(); this.render(this._g || 0); } }
+
+  // Build the staff-highlight overlay: one polyline per traced staff line, as
+  // LineSegments. Segments are sorted left-to-right so a draw-range reveals them
+  // in a wipe. Each vertex stores its found (bent) v and flat v so the lines can
+  // be ironed flat by lerping between them.
+  _buildStaffOverlay(demo, px0, px1, py0, py1) {
+    this.staff = null;
+    const staves = demo.staves;
+    if (!staves || !staves.length) return;
+    const segU = [], segYf = [], segYflat = [], segX = [];
+    for (const sys of staves) {
+      const xs = sys.xs;
+      for (let li = 0; li < sys.lines.length; li++) {
+        const ys = sys.lines[li], fy = sys.flat[li];
+        for (let i = 0; i < xs.length - 1; i++) {
+          segU.push(xs[i], xs[i + 1]);
+          segYf.push(ys[i], ys[i + 1]);
+          segYflat.push(fy, fy);
+          segX.push((xs[i] + xs[i + 1]) / 2);
+        }
+      }
+    }
+    const order = segX.map((x, i) => i).sort((a, b) => segX[a] - segX[b]);
+    const nseg = order.length;
+    this.staffU = new Float32Array(nseg * 2);
+    this.staffYf = new Float32Array(nseg * 2);
+    this.staffYflat = new Float32Array(nseg * 2);
+    for (let s = 0; s < nseg; s++) {
+      const o = order[s];
+      this.staffU[s*2] = segU[o*2]; this.staffU[s*2+1] = segU[o*2+1];
+      this.staffYf[s*2] = segYf[o*2]; this.staffYf[s*2+1] = segYf[o*2+1];
+      this.staffYflat[s*2] = segYflat[o*2]; this.staffYflat[s*2+1] = segYflat[o*2+1];
+    }
+    this.staffPlate = { px0, px1, py0, py1 };
+    this.staffN = nseg * 2;
+    this.staffGeo = new THREE.BufferGeometry();
+    this.staffGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(this.staffN * 3), 3));
+    this.staffMat = new THREE.LineBasicMaterial({ color: AMBER, transparent: true, opacity: 0 });
+    this.staff = new THREE.LineSegments(this.staffGeo, this.staffMat);
+    this.staff.position.z = 0.028;
+    this.scene.add(this.staff);
+  }
+
+  _writeStaffOverlay(ironT) {
+    if (!this.staff) return;
+    const { px0, px1, py0, py1 } = this.staffPlate;
+    const pos = this.staffGeo.attributes.position.array;
+    for (let n = 0; n < this.staffN; n++) {
+      const u = this.staffU[n];
+      const v = this.staffYf[n] + (this.staffYflat[n] - this.staffYf[n]) * ironT;
+      pos[n*3] = px0 + (px1 - px0) * u;
+      pos[n*3+1] = py0 + (py1 - py0) * v;
+      pos[n*3+2] = 0;
+    }
+    this.staffGeo.attributes.position.needsUpdate = true;
+  }
 
   _writePositions(morphT, lift) {
     const s = this.src2d, d = this.dst2d, c = this.cur;
@@ -282,32 +345,40 @@ export class Cinematic {
     this._g = g;
 
     // --- phase envelopes (overlapping = continuous) ---
-    const morphT   = sstep(0.40, 0.60, g);              // dewarp / un-warp
-    const hlOp     = (sstep(0.08, 0.18, g) - sstep(0.36, 0.46, g)) * 0.34;
-    const outDraw  = sstep(0.14, 0.28, g);
-    const gridDraw = sstep(0.26, 0.44, g);              // slower diagonal corner sweep
-    const linesOut = 1 - sstep(0.54, 0.62, g);          // grid+outline fade as it flattens
+    // capture -> find page -> map -> LIFT FLAT -> FIND STAVES -> IRON FLAT -> CLEAN INK
+    const morphT   = sstep(0.38, 0.54, g);              // dewarp / un-warp (lift flat)
+    const hlOp     = (sstep(0.08, 0.18, g) - sstep(0.34, 0.44, g)) * 0.34;
+    const outDraw  = sstep(0.14, 0.26, g);
+    const gridDraw = sstep(0.24, 0.42, g);              // diagonal corner sweep
+    const linesOut = 1 - sstep(0.48, 0.56, g);          // UV grid+outline fade as it flattens
     const outOp    = sstep(0.14, 0.20, g) * linesOut;
-    const gridOp   = sstep(0.26, 0.32, g) * linesOut;
-    const bgFade   = 1 - sstep(0.40, 0.60, g) * 0.95;   // background darkens as page lifts
-    const developT = sstep(0.60, 0.70, g);              // dewarped photo -> clean wavy ink
-    const ironT    = sstep(0.70, 0.88, g);              // UV morph: iron staves flat
-    const finalT   = sstep(0.88, 0.99, g);              // ironed wavy -> crisp final
+    const gridOp   = sstep(0.24, 0.30, g) * linesOut;
+    const bgFade   = 1 - sstep(0.38, 0.54, g) * 0.95;   // background darkens as page lifts
+    const rectIn   = sstep(0.50, 0.58, g);              // photo -> dewarped rect (seamless)
+    const findDraw = sstep(0.56, 0.68, g);              // staff highlights wipe on
+    const ironT    = sstep(0.66, 0.84, g);              // iron the page + staves flat
+    const staffFade = 1 - sstep(0.80, 0.88, g);         // highlights fade as ink develops
+    const finalT   = sstep(0.85, 0.99, g);              // lit rect -> crisp clean ink
 
     this._writePositions(morphT, 0);
+    this._writeStaffOverlay(ironT);
 
     this.hlMat.opacity = Math.max(0, hlOp);
     this.outMat.opacity = Math.max(0, outOp);
     this.gridMat.opacity = Math.max(0, gridOp);
     this.bgMat.opacity = bgFade;
-    // page (dewarped photo) appears as it lifts, then hands off to the clean wavy
-    // page during "develop"; the wavy page irons flat, then hands off to the ink.
-    this.pageMat.opacity = sstep(0.40, 0.45, g) * (1 - developT);
-    if (this.wavyMat) {
-      this.wavyMat.opacity = developT * (1 - finalT);
-      const a = this.uvWavyFlat, b = this.uvWavyStraight, uv = this.wavyGeo.attributes.uv.array;
+    // page (dewarped photo) appears on lift, hands off to the rect texture, which
+    // irons flat, then hands off to the clean ink.
+    this.pageMat.opacity = sstep(0.38, 0.43, g) * (1 - rectIn);
+    if (this.rectMat) {
+      this.rectMat.opacity = rectIn * (1 - finalT);
+      const a = this.uvRectFlat, b = this.uvRectStraight, uv = this.rectGeo.attributes.uv.array;
       for (let n = 0; n < a.length; n++) uv[n] = a[n] + (b[n] - a[n]) * ironT;
-      this.wavyGeo.attributes.uv.needsUpdate = true;
+      this.rectGeo.attributes.uv.needsUpdate = true;
+    }
+    if (this.staffMat) {
+      this.staffMat.opacity = Math.max(0, findDraw * staffFade * 0.95);
+      this.staffGeo.setDrawRange(0, Math.max(0, Math.floor((this.staffN / 2) * findDraw) * 2));
     }
     if (this.inkMat) this.inkMat.opacity = finalT;
 
