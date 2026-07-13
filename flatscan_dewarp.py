@@ -605,6 +605,122 @@ def _staff_hextent(horiz: np.ndarray, raw: np.ndarray, xcs: np.ndarray,
     return jL, jR
 
 
+def _find_spines(emph: np.ndarray, space: int, thickness: int,
+                 five_bands: list[tuple[int, int]]) -> list[tuple[int, int, int]]:
+    """Row indices ``(r, xL, xR)`` of full-width single-line percussion staves.
+
+    A percussion part is dominated by one-line staves (triangle, bass drum, tam-
+    tam, snare, ...) that the five-line comb correctly ignores. Each is a single
+    ruled line that spans the whole system width, so we take the emphasis-map row
+    peaks that (a) do not fall inside any detected five-line band and (b) read as
+    a genuine ruled line -- highly contiguous horizontal ink covering most of the
+    page width. Requiring near-full width rejects short trills / pedal / hairpin
+    marks, and the band exclusion (rather than comb-line coincidence) is what
+    keeps dense orchestral pages, where between-staff ink is everywhere, from
+    sprouting phantom spines -- so this is a strict no-op on the references.
+    """
+    horiz = (emph > 0)
+    H, W = horiz.shape
+    proj = horiz.sum(1).astype(np.float32)
+    pm = float(proj.max())
+    if pm <= 0:
+        return []
+    win = max(1, thickness)
+    peaks: list[int] = []
+    for i in range(1, H - 1):
+        if proj[i] > 0.10 * pm and proj[i] >= proj[i - 1] and proj[i] >= proj[i + 1]:
+            if peaks and i - peaks[-1] <= max(6, int(0.5 * space)):
+                if proj[i] > proj[peaks[-1]]:
+                    peaks[-1] = i
+                continue
+            peaks.append(i)
+
+    # Measure each peak's horizontal extent once; a "wide" peak is a full ruled
+    # line (staff line or spine), a narrow one is incidental ink (ledger line,
+    # tremolo/trill fragment, text) that must not influence the comb test.
+    info = {}
+    for r in peaks:
+        band = horiz[max(0, r - win):r + win + 1, :].any(0)
+        xs = np.where(band)[0]
+        if len(xs) < 2:
+            info[r] = (0, 0, 0.0, 0.0); continue
+        frac = (xs[-1] - xs[0]) / W
+        cover = float(band[xs[0]:xs[-1] + 1].mean())
+        info[r] = (int(xs[0]), int(xs[-1]), frac, cover)
+    wide = [r for r in peaks if info[r][2] >= 0.55 and info[r][3] >= 0.55]
+
+    def owned(r: int) -> bool:
+        return any(yt <= r <= yb for (yt, yb) in five_bands)
+
+    pitch = space + thickness
+    tol = 0.30 * pitch
+
+    def has_comb_neighbour(r: int) -> bool:
+        # A real percussion spine is a lone one-line staff: no *other full-width
+        # ruled line* sits a staff pitch above or below it. A wide neighbour at
+        # pitch means this is one rule of a five-line staff (possibly one a warp
+        # made the comb detector briefly miss) -- never a spine. Narrow ink at
+        # pitch (ledger lines, tremolo) is ignored so genuine spines survive.
+        return any(p != r and abs(abs(r - p) - pitch) <= tol for p in wide)
+
+    spines: list[tuple[int, int, int]] = []
+    for r in wide:
+        if owned(r) or has_comb_neighbour(r):
+            continue
+        xL, xR, _f, _c = info[r]
+        spines.append((int(r), xL, xR))
+    return spines
+
+
+def _trace_single_line(horiz: np.ndarray, raw: np.ndarray, r0: int, xL: int,
+                       xR: int, xcs: np.ndarray, space: int):
+    """Ridge-follow one spine from seed row r0 across [xL,xR].
+
+    Returns ``(L1, found_frac)`` where ``L1`` is a ``(1, len(xcs))`` trace and
+    ``found_frac`` the fraction of in-extent columns where real ink was found --
+    a reliability gauge so an untraceable spine can be discarded rather than
+    warping its neighbourhood from a bad curve."""
+    win = max(3, int(round(0.6 * space)))
+    n = len(xcs)
+    cen = np.full(n, np.nan, np.float32)
+    idx = [j for j, x in enumerate(xcs) if xL <= x <= xR]
+    if not idx:
+        return None, 0.0
+
+    def probe(x: int, est: float):
+        lo = max(0, int(est - win)); hi = int(est + win)
+        seg = np.where(horiz[lo:hi, x] > 0)[0]
+        if len(seg):
+            return lo + float(np.median(seg))
+        seg = np.where(raw[lo:hi, x] > 0)[0]
+        if len(seg):
+            yy = lo + seg
+            return float(yy[int(np.argmin(np.abs(yy - est)))])
+        return None
+
+    found = 0
+    mid = idx[len(idx) // 2]
+    est = float(r0)
+    for j in range(mid, idx[-1] + 1):
+        v = probe(int(xcs[j]), est)
+        if v is not None:
+            est = 0.5 * est + 0.5 * v; found += 1
+        cen[j] = est
+    est = float(r0)
+    for j in range(mid - 1, idx[0] - 1, -1):
+        v = probe(int(xcs[j]), est)
+        if v is not None:
+            est = 0.5 * est + 0.5 * v; found += 1
+        cen[j] = est
+    good = np.where(~np.isnan(cen))[0]
+    if len(good):
+        cen[:good[0]] = cen[good[0]]
+        cen[good[-1] + 1:] = cen[good[-1]]
+    k = 9
+    cen = np.convolve(np.pad(cen, k // 2, mode="edge"), np.ones(k) / k, mode="valid")
+    return cen.reshape(1, -1).astype(np.float32), found / max(1, len(idx))
+
+
 def _trace_staff_lines(gray: np.ndarray):
     """Trace every staff line of every system across the full page width.
 
@@ -798,6 +914,31 @@ def _trace_staff_lines(gray: np.ndarray):
                     sl = float(np.clip(sl, -0.5, 0.5))
                     for j in range(0, jL):
                         L[:, j] = L[:, jL] + sl * (xcs[j] - xcs[jL])
+
+    # Single-line percussion spines: full-width one-line staves outside any five-
+    # line system. Each is traced as a degenerate one-line "comb" and appended so
+    # the shared displacement builder irons it flat exactly like a five-line
+    # centre. Gated to percussion-like pages (low five-line coverage): on
+    # orchestral/timpani pages -- where almost all horizontal-line ink already
+    # belongs to a five-line staff -- spine detection is skipped entirely, so
+    # their output (and every intermediate warp measured during refinement) is
+    # byte-for-byte unchanged. A spine whose trace is unreliable or wanders
+    # implausibly is dropped rather than warping its neighbourhood.
+    proj_e = (emph > 0).sum(1).astype(np.float64)
+    tot = float(proj_e.sum())
+    coverage = 1.0 if tot <= 0 else sum(
+        float(proj_e[yt:yb].sum()) for (yt, yb) in systems) / tot
+    if coverage < _STAFF_COVERAGE_MIN:
+        for (r0, sxL, sxR) in _find_spines(emph, space, thickness, systems):
+            L1, ffrac = _trace_single_line(horiz, raw, r0, sxL, sxR, xcs, space)
+            if L1 is None or ffrac < 0.85:
+                continue
+            cc = L1[0][~np.isnan(L1[0])]
+            if len(cc) < 8 or (np.percentile(cc, 98) - np.percentile(cc, 2)) > 4.0 * space:
+                continue
+            ytop = max(0, int(r0 - 1.5 * space))
+            ybot = min(h, int(r0 + 1.5 * space))
+            out.append((ytop, ybot, L1))
     return xcs, out, space
 
 
@@ -956,17 +1097,24 @@ def straighten_staves(gray: np.ndarray, max_disp_factor: float = 6.0,
     rigid result: if the guided trace misbehaves (unusual editions, dense pages)
     its output measures wavier and is discarded.
     """
-    # Confidence gate: if the five-line staff model does not account for most of
-    # the page's horizontal-line ink, the page is percussion-like (dominated by
-    # single-line staves) and straightening would iron a few wavily-traced 5-line
-    # staves at the cost of warping the undetected single-line ones. Leave it
-    # rectified -- strictly safer than a warp we cannot trust. Orchestral/timpani
-    # pages sit far above the threshold, so this never touches them.
+    # Percussion pages (dominated by single-line staves) used to be skipped here
+    # because the five-line-only tracer could not model them. Now that
+    # ``_trace_staff_lines`` also traces single-line spines, those staves are
+    # ironed flat too, so we no longer bail out on low five-line coverage. Two
+    # guards keep this safe: the guided-vs-rigid choice below (keep the flatter),
+    # and -- only on percussion-like pages -- a never-worse-than-identity check
+    # (``_guard``) that leaves the page rectified if neither warp actually beats
+    # the input. On orchestral/timpani pages ``_guard`` is a pass-through, so
+    # their output is byte-for-byte unchanged.
     coverage = _staff_model_coverage(gray)
-    if coverage < _STAFF_COVERAGE_MIN:
-        return gray, dict(reason="staff model coverage too low (percussion-like)",
-                          coverage=round(float(coverage), 3), applied=False,
-                          method="skipped")
+    input_flat = _staff_flatness(gray) if coverage < _STAFF_COVERAGE_MIN else None
+
+    def _guard(out_img, inf, out_flat):
+        if input_flat is not None and out_flat + 0.5 >= input_flat:
+            return gray, dict(reason="straighten no better than leaving rectified",
+                              coverage=round(float(coverage), 3), applied=False,
+                              method="identity")
+        return out_img, inf
 
     # Try the (fast, vectorized) guided warp first. If it lands the staff lines
     # convincingly flat, accept it without paying for the slower rigid pass; only
@@ -994,7 +1142,7 @@ def straighten_staves(gray: np.ndarray, max_disp_factor: float = 6.0,
         ginfo["method"] = "guided"
         if gflat <= _GUIDED_ACCEPT_PX:
             ginfo["applied"] = True
-            return guided_out, ginfo
+            return _guard(guided_out, ginfo, gflat)
 
     rigid_out, rinfo = _straighten_staves_rigid(gray, max_disp_factor, passes, refine_min_px)
     rigid_flat = _staff_flatness(rigid_out)
@@ -1005,12 +1153,12 @@ def straighten_staves(gray: np.ndarray, max_disp_factor: float = 6.0,
     if guided_out is not None and ginfo["flatness"] + 0.5 < rigid_flat:
         ginfo["applied"] = True
         ginfo["rigid_flatness"] = rigid_flat
-        return guided_out, ginfo
+        return _guard(guided_out, ginfo, ginfo["flatness"])
     rinfo["applied"] = True
     rinfo["flatness"] = rigid_flat
     if guided_out is not None:
         rinfo["guided_flatness"] = ginfo["flatness"]
-    return rigid_out, rinfo
+    return _guard(rigid_out, rinfo, rigid_flat)
 
 
 def _straighten_staves_rigid(gray: np.ndarray, max_disp_factor: float = 6.0,
