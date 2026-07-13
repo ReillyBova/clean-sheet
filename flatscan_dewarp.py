@@ -44,6 +44,18 @@ import numpy as np
 # accepted outright, skipping the slower rigid comparison pass.
 _GUIDED_ACCEPT_PX = 3.0
 
+# Minimum fraction of the page's horizontal-line ink that must fall inside the
+# detected five-line staff systems for staff-guided straightening to be trusted.
+# Percussion parts are dominated by *single-line* staves (triangle, cymbals,
+# drums) that the five-tooth comb detector correctly ignores -- so on those
+# pages most horizontal-line ink lies *outside* the few detected 5-line staves,
+# and ironing those few (traced wavily through tremolos/ornaments) warps the
+# undetected single-line staves into waves. Measured coverage cleanly separates
+# the two regimes: real orchestral/timpani pages score ~0.90-0.97, percussion
+# ~0.45-0.47. Below this threshold the 5-line model does not explain the page,
+# so we leave it rectified rather than risk warping it.
+_STAFF_COVERAGE_MIN = 0.70
+
 
 def _staff_metrics(bw: np.ndarray) -> tuple[int, int]:
     """Estimate (staff_line_thickness, staff_space) via vertical run-lengths."""
@@ -905,6 +917,34 @@ def _staff_flatness(gray: np.ndarray) -> float:
     return float(np.median(devs)) if devs else float("inf")
 
 
+def _staff_model_coverage(gray: np.ndarray) -> float:
+    """Fraction of the page's horizontal-line ink that lies inside detected
+    five-line staff systems.
+
+    A tracer-independent confidence gauge for the five-line staff model. Built
+    from the same horizontal-emphasis map the detector uses: project it to a
+    per-row ink count and measure how much of that ink falls within the row
+    windows of the detected 5-line systems. On orchestral/timpani pages almost
+    every staff line belongs to a detected system (~0.9+); on percussion pages,
+    which are mostly single-line staves the 5-tooth comb correctly ignores, much
+    of the horizontal-line ink sits outside the few detected systems (~0.45).
+
+    Returns 1.0 when there is no horizontal-line ink (nothing to straighten) so
+    the caller's own "too few systems" no-op handles those pages.
+    """
+    bw = (gray < 150).astype(np.uint8) * 255
+    thickness, space = _staff_metrics(bw)
+    emph = _emphasize(bw, thickness)
+    proj = (emph > 0).sum(1).astype(np.float64)
+    total = float(proj.sum())
+    if total <= 0:
+        return 1.0
+    inside = 0.0
+    for (ytop, ybot) in _find_systems(emph, space, thickness):
+        inside += float(proj[ytop:ybot].sum())
+    return inside / total
+
+
 def straighten_staves(gray: np.ndarray, max_disp_factor: float = 6.0,
                       passes: int = 5, refine_min_px: float = 1.5):
     """Flatten wavy/skewed staff lines. Returns (output_gray, info).
@@ -916,6 +956,18 @@ def straighten_staves(gray: np.ndarray, max_disp_factor: float = 6.0,
     rigid result: if the guided trace misbehaves (unusual editions, dense pages)
     its output measures wavier and is discarded.
     """
+    # Confidence gate: if the five-line staff model does not account for most of
+    # the page's horizontal-line ink, the page is percussion-like (dominated by
+    # single-line staves) and straightening would iron a few wavily-traced 5-line
+    # staves at the cost of warping the undetected single-line ones. Leave it
+    # rectified -- strictly safer than a warp we cannot trust. Orchestral/timpani
+    # pages sit far above the threshold, so this never touches them.
+    coverage = _staff_model_coverage(gray)
+    if coverage < _STAFF_COVERAGE_MIN:
+        return gray, dict(reason="staff model coverage too low (percussion-like)",
+                          coverage=round(float(coverage), 3), applied=False,
+                          method="skipped")
+
     # Try the (fast, vectorized) guided warp first. If it lands the staff lines
     # convincingly flat, accept it without paying for the slower rigid pass; only
     # when it is marginal or unavailable do we compute rigid and keep the flatter.
