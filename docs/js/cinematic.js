@@ -195,10 +195,10 @@ export class Cinematic {
     this.hl.position.z = 0.01;
     this.scene.add(this.hl);
 
-    // outline (perimeter order, draws on, morphs). Its SRC positions come from a
-    // separate display-only boundary (demo.outline) that hugs the true paper
-    // edge — the page mesh boundary is inset+smoothed to match the rasters and
-    // sits ~1% inside the real edge. Falls back to the mesh perimeter if absent.
+    // outline (perimeter order, draws on, morphs). The page mesh boundary now
+    // traces the true paper edge (non-inset, barely smoothed) and the rasters are
+    // feathered to match, so the outline simply walks the mesh perimeter — flush
+    // with the real edge and pixel-aligned with the warped page (no gap ring).
     this.perim = [];
     for (let i = 0; i < GW; i++) this.perim.push(i);                         // top L→R
     for (let j = 1; j < GH; j++) this.perim.push(j * GW + (GW - 1));         // right
@@ -206,11 +206,9 @@ export class Cinematic {
     for (let j = GH - 2; j >= 0; j--) this.perim.push(j * GW);              // left
     this.outSrc = new Float32Array(this.perim.length * 2);
     this.outDst = new Float32Array(this.perim.length * 2);
-    const ol = demo.outline;
     for (let n = 0; n < this.perim.length; n++) {
       const k = this.perim[n];
-      if (ol && ol[n]) { this.outSrc[n*2] = ol[n][0]; this.outSrc[n*2+1] = ol[n][1] * aspect; }
-      else { this.outSrc[n*2] = this.src2d[k*2]; this.outSrc[n*2+1] = this.src2d[k*2+1]; }
+      this.outSrc[n*2] = this.src2d[k*2]; this.outSrc[n*2+1] = this.src2d[k*2+1];
       this.outDst[n*2] = this.dst2d[k*2]; this.outDst[n*2+1] = this.dst2d[k*2+1];
     }
     this.outGeo = new THREE.BufferGeometry();

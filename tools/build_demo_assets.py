@@ -57,6 +57,21 @@ def web_write(path, img, max_h=920, q=84):
     return os.path.getsize(path)
 
 
+def _feather_edge(img, k):
+    """Trim the outermost k px (which can hold a 1-2px dark reflectance sliver at
+    the true paper edge) and replicate the clean interior back out. The outer
+    fraction of a music page is always blank margin, so this only removes the
+    dark border line -- content and the effective boundary are unchanged. Used so
+    the demo can trace the REAL paper edge (no inset) yet keep clean rasters."""
+    if k <= 0:
+        return img
+    h, w = img.shape[:2]
+    if h <= 2 * k or w <= 2 * k:
+        return img
+    core = img[k:h - k, k:w - k]
+    return cv2.copyMakeBorder(core, k, k, k, k, cv2.BORDER_REPLICATE)
+
+
 def build_example(eid, label, pdf, page1, booklet, dims):
     """Run the pipeline for one page; write input.jpg + ink.jpg; return metadata."""
     w_in, h_in = dims
@@ -65,12 +80,25 @@ def build_example(eid, label, pdf, page1, booklet, dims):
     img_bgr = inp.render_page_bgr(page1 - 1)
     H, W = img_bgr.shape[:2]
 
-    # exact production pipeline (mirrors process_page), booklet-aware
+    # exact production segmentation (mirrors process_page), booklet-aware
     mask, _seg = fs.segment_page(img_bgr)
     seam = fs.detect_seam_for_page(img_bgr, mask) if booklet else None
     if seam is not None:
         mask = fs.clip_mask_at_crease(mask, seam)
-    rect, edges = fs.rectify_boundary_coons(img_bgr, mask, out_w, out_h, smooth=0.045)
+
+    # Unified TRUE-edge boundary for every demo layer -- page mesh, UV grid,
+    # highlight, rect, ink AND the outline all trace it -- so they sit flush with
+    # the real paper edge, share one boundary (no gap between the outline and the
+    # warped page, no lift->rect crossfade blur). Production instead insets 0.5%
+    # and smooths hard (0.045) to keep the dark reflectance sliver out of the
+    # cleaned raster; here we trace the real edge (barely smoothed, no inset) and
+    # feather that thin sliver off the rect/ink textures directly.
+    contour = fs.largest_external_contour(mask)
+    corners = fs.find_corners_from_contour(contour)
+    edges = fs.orient_edges(fs.split_into_edges(contour, corners), corners,
+                            n=1200, smooth=0.006)
+    fk = max(3, round(min(out_w, out_h) * 0.0018))
+    rect = _feather_edge(fs.remap_coons_chunked(img_bgr, edges, out_w, out_h), fk)
     cleaned, _ink, _thr = fs.clean_ink(rect, mode="soft-gray")
     # rect = the dewarped page BEFORE ink cleaning (still lit, staves still bent).
     # The webapp irons THIS flat (staves + page), then develops the clean ink last
@@ -92,36 +120,18 @@ def build_example(eid, label, pdf, page1, booklet, dims):
                                 cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
     else:
         final_clean, _ = fd.straighten_staves(cleaned)
+    final_clean = _feather_edge(final_clean, fk)
 
     web_write(os.path.join(STAGES, eid, "input.jpg"), img_bgr)
     web_write(os.path.join(STAGES, eid, "rect.jpg"), rect)
     web_write(os.path.join(STAGES, eid, "ink.jpg"), final_clean)
 
     # reprojection morph grid: source (photo) positions per mesh vertex, 0..1.
-    # Uses rectify's (inset) edges so the page mesh matches rect.jpg/ink.jpg
-    # exactly -- if the mesh traced a wider boundary than the rasters, the
-    # lift->rect crossfade would show a ~0.5% content shift (a blur).
+    # Same true-edge boundary as the rasters, so the mesh (and the grid/highlight
+    # that share it, and the outline traced from its perimeter) reaches the real
+    # paper edge while staying pixel-aligned with rect/ink.
     mx, my = fs.coons_maps(edges, GRID_W, GRID_H)
     src = np.stack([mx / (W - 1), my / (H - 1)], axis=-1)
-
-    # Display-only "find the page" outline. The mesh boundary above is inset 0.5%
-    # AND heavily smoothed (0.045) to match the rasters, which together sit ~1%
-    # inside the true paper edge -- visibly not flush. Trace a separate, barely
-    # smoothed, NON-inset boundary that hugs the real edge, sampled as the mesh
-    # perimeter (same order the webapp walks it) so the webapp can morph it by
-    # index alongside the page. Mesh/rasters are untouched (no blur).
-    o_contour = fs.largest_external_contour(mask)
-    o_corners = fs.find_corners_from_contour(o_contour)
-    o_edges = fs.orient_edges(fs.split_into_edges(o_contour, o_corners),
-                              o_corners, n=1200, smooth=0.006)
-    omx, omy = fs.coons_maps(o_edges, GRID_W, GRID_H)
-    osrc = np.stack([omx / (W - 1), omy / (H - 1)], axis=-1)
-    operi = []
-    for i in range(GRID_W): operi.append(osrc[0, i])
-    for j in range(1, GRID_H): operi.append(osrc[j, GRID_W - 1])
-    for i in range(GRID_W - 2, -1, -1): operi.append(osrc[GRID_H - 1, i])
-    for j in range(GRID_H - 2, 0, -1): operi.append(osrc[j, 0])
-    outline = np.round(np.array(operi), 5).tolist()
 
     # staff geometry (for the "find the staves" overlay and its ironing) + the
     # straighten UV-morph grid (irons the rect texture flat as a real warp). Reuse
@@ -160,7 +170,6 @@ def build_example(eid, label, pdf, page1, booklet, dims):
         "rect": f"stages/{eid}/rect.jpg",
         "ink": f"stages/{eid}/ink.jpg",
         "grid": {"w": GRID_W, "h": GRID_H, "src": src.reshape(-1, 2).round(5).tolist()},
-        "outline": outline,
         "straighten": straighten,
         "staves": staves,
         "output_aspect": round(w_in / h_in, 5),
