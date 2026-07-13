@@ -1447,7 +1447,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--render-scale", type=float, default=1.0, help="Multiplier on the input rasterization resolution. Pages are auto-rendered at their embedded image's native resolution; this scales that up/down (e.g. 0.5 for faster/lower-res)")
     ap.add_argument("--mode", choices=["soft-gray", "soft-black", "binary", "normalized-gray"], default="soft-gray", help="Final output style")
     ap.add_argument("--boundary-smooth", type=float, default=0.045, help="Boundary curve smoothing fraction for Coons warp")
-    ap.add_argument("--straighten", action="store_true", help="Opt-in: after rectification, straighten wavy/skewed staff lines using detected staves (best for sheet music). Safely no-ops on pages without clear staves")
+    ap.add_argument("--straighten", action=argparse.BooleanOptionalAction, default=True, help="After rectification, straighten wavy/skewed staff lines using detected staves (best for sheet music). On by default; safely no-ops on pages without clear staves. Pass --no-straighten to disable")
     ap.add_argument("--booklet", action="store_true", help="Opt-in: half-spread/booklet captures where one L/R edge folds into the spine and the facing page bleeds in. Detects the fold crease and clips the page there so the neighbour is excluded and the binding edge comes out clean. Full flat sheets in view (e.g. title pages) are left whole")
     ap.add_argument("--threshold-bias", type=int, default=16, help="Ink threshold adjustment; lower keeps less ink/noise, higher keeps more faint ink")
     ap.add_argument("--debug", action="store_true", help="Write intermediate masks/UV grids/alternate outputs")
